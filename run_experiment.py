@@ -145,14 +145,14 @@ def main():
         batch_size=args.batch_size,
     )
     
-    # Training config
+    # Training config (gradient checkpointing disabled to avoid issues with adapters)
     training_config = TrainingConfig(
         num_epochs=args.num_epochs,
         learning_rate=args.learning_rate,
         gradient_accumulation_steps=args.gradient_accumulation,
         output_dir=os.path.join(exp_dir, "checkpoints"),
         mixed_precision="bf16" if has_cuda else "fp32",
-        gradient_checkpointing=has_cuda,
+        gradient_checkpointing=False,  # Disabled - can cause issues with adapters
     )
     
     # Train

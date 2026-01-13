@@ -67,7 +67,9 @@ class HyLoRADAConfig:
     sparse_target_layers: Optional[List[int]] = None  # None = all layers
     
     # ============ S²-Attn Settings (Efficiency Backbone) ============
-    s2_attn_enabled: bool = True
+    # NOTE: S²-Attn disabled by default - requires architecture-specific handling
+    # for models with Grouped Query Attention (GQA) like Qwen2, Llama 3, etc.
+    s2_attn_enabled: bool = False
     s2_group_size: int = 2048  # Tokens per attention group
     s2_shift_ratio: float = 0.5  # Shift by half group size
     
