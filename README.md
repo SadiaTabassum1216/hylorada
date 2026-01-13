@@ -66,7 +66,7 @@ python example_train.py \
 python run_experiment.py \
     --model_name Qwen/Qwen2-0.5B \
     --max_length 1024 \
-    --num_epochs 1 \
+    --num_epochs 10 \
     --num_test_samples 50
 ```
 
