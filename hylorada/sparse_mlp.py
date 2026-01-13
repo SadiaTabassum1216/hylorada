@@ -356,10 +356,13 @@ def _infer_intermediate_size(ffn_module: nn.Module) -> Optional[int]:
 
 
 def get_sparse_params(model: nn.Module) -> list:
-    """Get all sparse adapter parameters from a model."""
+    """Get all sparse adapter parameters from a model (not base FFN)."""
     params = []
     for module in model.modules():
-        if isinstance(module, (SparseMLP, SparseAdapter, TopKGate)):
+        # Only count SparseAdapter and TopKGate, not SparseMLP (which includes base FFN)
+        if isinstance(module, SparseAdapter):
+            params.extend(module.parameters())
+        elif isinstance(module, TopKGate):
             params.extend(module.parameters())
     return params
 
