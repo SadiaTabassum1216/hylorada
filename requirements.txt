@@ -1,0 +1,22 @@
+# HyLoRADA Dependencies
+
+# Core PyTorch
+torch>=2.0.0
+
+# HuggingFace Transformers (for model loading)
+transformers>=4.36.0
+
+# HuggingFace Datasets (for data loading)
+datasets>=2.16.0
+
+# Tokenizers
+tokenizers>=0.15.0
+
+# Progress bars
+tqdm>=4.65.0
+
+# HuggingFace Accelerate (for distributed training)
+accelerate>=0.25.0
+
+# Testing
+pytest>=7.4.0
