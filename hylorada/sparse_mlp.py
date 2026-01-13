@@ -229,19 +229,25 @@ class SparseMLP(nn.Module):
             self.neuron_delta = nn.Parameter(torch.zeros(intermediate_size))
     
     def _get_hidden_size(self) -> int:
-        """Infer hidden size from base FFN."""
+        """Infer hidden size from base FFN (the input/output dim, not intermediate)."""
         # Try common attribute names
         for attr in ["hidden_size", "embed_dim", "d_model"]:
             if hasattr(self.base_ffn, attr):
                 return getattr(self.base_ffn, attr)
         
-        # Try to infer from first linear layer (including Conv1D)
+        # Find all linear layer dimensions and take the SMALLEST in_features
+        # (hidden_size is typically smaller than intermediate_size)
+        min_in_features = float('inf')
+        
         for module in self.base_ffn.modules():
             if isinstance(module, nn.Linear):
-                return module.in_features
+                min_in_features = min(min_in_features, module.in_features)
             # HuggingFace Conv1D (used in GPT-2)
             if type(module).__name__ == 'Conv1D':
-                return module.weight.shape[0]
+                min_in_features = min(min_in_features, module.weight.shape[0])
+        
+        if min_in_features != float('inf'):
+            return int(min_in_features)
         
         raise ValueError("Could not infer hidden_size from base FFN")
     

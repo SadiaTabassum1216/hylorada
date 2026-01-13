@@ -61,9 +61,10 @@ class HyLoRADAConfig:
     daa_per_head: bool = True
     
     # ============ Sparse MLP Settings (Local Precision) ============
-    sparse_enabled: bool = True
+    # NOTE: Disabled by default to keep parameter count low. Enable for full HyLoRADA.
+    sparse_enabled: bool = False
     sparse_topk_ratio: float = 0.1  # Activate top 10% of neurons
-    sparse_adapter_dim: int = 64
+    sparse_adapter_dim: int = 32  # Reduced from 64 for efficiency
     sparse_target_layers: Optional[List[int]] = None  # None = all layers
     
     # ============ S²-Attn Settings (Efficiency Backbone) ============
