@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 from .config import HyLoRADAConfig
 from .lora import LoRALayer, apply_lora_to_model, count_lora_params, merge_lora_weights
-from .daa import DirectAttentionAdapter, apply_daa_to_attention, count_daa_params
+from .daa import DirectAttentionAdapter, PositionalDAA, apply_daa_to_attention, count_daa_params
 from .sparse_mlp import SparseMLP, SparseAdapter, apply_sparse_to_ffn, count_sparse_params
 from .s2_attention import ShiftedSparseAttention, apply_s2_attention, get_s2_memory_estimate
 
@@ -147,7 +147,11 @@ class HyLoRADAModel(nn.Module):
             self._connect_daa_to_s2()
     
     def _apply_daa(self):
-        """Apply Direct Attention Adaptation to attention layers."""
+        """Apply Direct Attention Adaptation to attention layers.
+        
+        Uses PositionalDAA when daa_use_positional is enabled (recommended for
+        long-context tasks to address the Lost-in-the-Middle phenomenon).
+        """
         layer_idx = 0
         
         for name, module in self.base_model.named_modules():
@@ -160,12 +164,21 @@ class HyLoRADAModel(nn.Module):
                 )
                 
                 if has_proj:
-                    daa = DirectAttentionAdapter(
-                        num_heads=self.num_heads,
-                        per_head=self.config.daa_per_head,
-                        init_alpha=self.config.daa_init_alpha,
-                        init_beta=self.config.daa_init_beta,
-                    )
+                    # Use PositionalDAA for better long-context handling (Lost-in-the-Middle)
+                    if self.config.daa_use_positional:
+                        daa = PositionalDAA(
+                            num_heads=self.num_heads,
+                            max_seq_len=self.config.max_sequence_length,
+                            num_buckets=self.config.daa_num_buckets,
+                            per_head=self.config.daa_per_head,
+                        )
+                    else:
+                        daa = DirectAttentionAdapter(
+                            num_heads=self.num_heads,
+                            per_head=self.config.daa_per_head,
+                            init_alpha=self.config.daa_init_alpha,
+                            init_beta=self.config.daa_init_beta,
+                        )
                     module.daa_adapter = daa
                     self.state.daa_adapters[name] = daa
                     layer_idx += 1

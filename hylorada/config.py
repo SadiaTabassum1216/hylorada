@@ -51,20 +51,25 @@ class HyLoRADAConfig:
     lora_rank: int = 8
     lora_alpha: float = 16.0
     lora_dropout: float = 0.05
-    # Supports: LLaMA (q_proj, v_proj), GPT-2 (c_attn, c_proj), Falcon (query_key_value)
-    lora_target_modules: Tuple[str, ...] = ("q_proj", "v_proj", "c_attn", "c_proj", "query_key_value")
+    # Supports: LLaMA (q_proj, k_proj, v_proj, o_proj), GPT-2 (c_attn, c_proj), Falcon (query_key_value)
+    # Added k_proj and o_proj for better coverage of attention mechanism
+    lora_target_modules: Tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj", "c_attn", "c_proj", "query_key_value")
     
     # ============ DAA Settings (Noise Filtering) ============
     daa_enabled: bool = True
     daa_init_alpha: float = 1.0
     daa_init_beta: float = 0.0
     daa_per_head: bool = True
+    # PositionalDAA: Uses position-aware biases to address Lost-in-the-Middle phenomenon
+    daa_use_positional: bool = True  # Enable PositionalDAA for better long-context handling
+    daa_num_buckets: int = 64  # Number of relative position buckets
     
     # ============ Sparse MLP Settings (Local Precision) ============
-    # NOTE: Disabled by default to keep parameter count low. Enable for full HyLoRADA.
-    sparse_enabled: bool = False
-    sparse_topk_ratio: float = 0.1  # Activate top 10% of neurons
-    sparse_adapter_dim: int = 32  # Reduced from 64 for efficiency
+    # Large-Sparse strategy (from SparseAdapter paper): larger adapter with higher sparsity
+    # outperforms smaller dense adapters at the same parameter budget
+    sparse_enabled: bool = True  # Enabled by default for full HyLoRADA
+    sparse_topk_ratio: float = 0.05  # Activate top 5% of neurons (increased sparsity)
+    sparse_adapter_dim: int = 128  # Larger bottleneck (Large-Sparse strategy)
     sparse_target_layers: Optional[List[int]] = None  # None = all layers
     
     # ============ S²-Attn Settings (Efficiency Backbone) ============
@@ -124,6 +129,8 @@ class HyLoRADAConfig:
             "daa_init_alpha": self.daa_init_alpha,
             "daa_init_beta": self.daa_init_beta,
             "daa_per_head": self.daa_per_head,
+            "daa_use_positional": self.daa_use_positional,
+            "daa_num_buckets": self.daa_num_buckets,
             "sparse_enabled": self.sparse_enabled,
             "sparse_topk_ratio": self.sparse_topk_ratio,
             "sparse_adapter_dim": self.sparse_adapter_dim,
@@ -169,12 +176,18 @@ class HyLoRADAPresets:
     
     @staticmethod
     def high_accuracy() -> HyLoRADAConfig:
-        """Higher capacity config for maximum accuracy."""
+        """Higher capacity config for maximum accuracy.
+        
+        Uses Large-Sparse strategy (bigger adapter, higher sparsity) and
+        higher LoRA rank for better task adaptation.
+        """
         return HyLoRADAConfig(
             lora_rank=16,
             lora_alpha=32.0,
-            sparse_topk_ratio=0.2,
-            sparse_adapter_dim=128,
+            sparse_enabled=True,
+            sparse_topk_ratio=0.05,  # Large-Sparse: higher sparsity
+            sparse_adapter_dim=256,  # Large-Sparse: bigger adapter
+            daa_use_positional=True,
             budget_lora=0.5,
             budget_daa=0.15,
             budget_sparse=0.35,
@@ -182,8 +195,14 @@ class HyLoRADAPresets:
     
     @staticmethod
     def long_context_128k() -> HyLoRADAConfig:
-        """Optimized for 128k+ context lengths."""
+        """Optimized for 128k+ context lengths.
+        
+        Enables PositionalDAA to address the Lost-in-the-Middle phenomenon
+        where models struggle with information in the middle of long contexts.
+        """
         return HyLoRADAConfig(
+            daa_use_positional=True,  # Critical for long context
+            daa_num_buckets=128,  # More buckets for longer sequences
             s2_group_size=4096,
             max_sequence_length=131072,
             gradient_checkpointing=True,

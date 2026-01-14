@@ -3,3 +3,5 @@ output
 experiments
 .pytest_cache
 __pycache__
+
+LR_papers

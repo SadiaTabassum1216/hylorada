@@ -72,16 +72,6 @@ python run_experiment.py \
 
 Results are saved to `./experiments/exp_TIMESTAMP/results.json`
 
-### Quick Test (CPU)
-```bash
-python run_experiment.py \
-    --model_name sshleifer/tiny-gpt2 \
-    --max_length 64 \
-    --num_epochs 1 \
-    --num_test_samples 10 \
-    --gradient_accumulation 2
-```
-
 ## Testing
 
 ```bash

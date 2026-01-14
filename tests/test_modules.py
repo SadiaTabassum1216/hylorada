@@ -58,8 +58,12 @@ class TestConfig:
         config = HyLoRADAConfig()
         assert config.lora_rank == 8
         assert config.daa_enabled == True
-        assert config.sparse_enabled == True
-        assert config.s2_attn_enabled == True
+        assert config.daa_use_positional == True  # Now enabled by default
+        assert config.sparse_enabled == True  # Enabled by default for full HyLoRADA
+        assert config.s2_attn_enabled == False  # Disabled by default
+        # Large-Sparse strategy defaults
+        assert config.sparse_adapter_dim == 128
+        assert config.sparse_topk_ratio == 0.05
     
     def test_budget_validation(self):
         """Test that budget must sum to 1.0."""
