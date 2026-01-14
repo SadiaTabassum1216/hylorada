@@ -149,10 +149,12 @@ class SparseAdapter(nn.Module):
         Returns:
             Output with sparse adapter contribution added
         """
-        # Ensure weights match input dtype (handles bfloat16 during mixed-precision)
-        if x.dtype != self.down_proj.weight.dtype:
-            self.down_proj.weight.data = self.down_proj.weight.data.to(x.dtype)
-            self.up_proj.weight.data = self.up_proj.weight.data.to(x.dtype)
+        # Ensure weights match input device and dtype (handles multi-GPU and bfloat16)
+        if x.device != self.down_proj.weight.device or x.dtype != self.down_proj.weight.dtype:
+            self.down_proj.weight.data = self.down_proj.weight.data.to(device=x.device, dtype=x.dtype)
+            self.up_proj.weight.data = self.up_proj.weight.data.to(device=x.device, dtype=x.dtype)
+            # Also move gate parameters to the correct device
+            self.gate.gate_scores.data = self.gate.gate_scores.data.to(device=x.device, dtype=x.dtype)
         
         # Down project
         down = self.down_proj(x)  # [batch, seq, adapter_dim]
