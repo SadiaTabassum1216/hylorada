@@ -149,6 +149,11 @@ class SparseAdapter(nn.Module):
         Returns:
             Output with sparse adapter contribution added
         """
+        # Ensure weights match input dtype (handles bfloat16 during mixed-precision)
+        if x.dtype != self.down_proj.weight.dtype:
+            self.down_proj.weight.data = self.down_proj.weight.data.to(x.dtype)
+            self.up_proj.weight.data = self.up_proj.weight.data.to(x.dtype)
+        
         # Down project
         down = self.down_proj(x)  # [batch, seq, adapter_dim]
         
