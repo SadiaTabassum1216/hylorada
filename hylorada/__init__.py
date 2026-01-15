@@ -13,6 +13,14 @@ from hylorada.evaluation import (
     compare_models,
     run_full_evaluation,
 )
+from hylorada.baselines import (
+    StandardLoRA,
+    LoRaDAModel,
+    LongLoRAModel,
+    SparseAdapterModel,
+    BaselineConfig,
+    get_baseline_model,
+)
 
 __version__ = "0.1.0"
 __all__ = [
@@ -29,4 +37,11 @@ __all__ = [
     "evaluate_lost_in_the_middle",
     "compare_models",
     "run_full_evaluation",
+    # Baselines for comparison
+    "StandardLoRA",
+    "LoRaDAModel",
+    "LongLoRAModel",
+    "SparseAdapterModel",
+    "BaselineConfig",
+    "get_baseline_model",
 ]
