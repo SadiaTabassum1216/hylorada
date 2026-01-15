@@ -91,6 +91,10 @@ class StandardLoRA(nn.Module):
             "lora_params": count_lora_params(self.base_model),
         }
     
+    def get_trainable_params(self):
+        """Return list of trainable parameters for gradient clipping."""
+        return [p for p in self.parameters() if p.requires_grad]
+    
     def print_trainable_params(self):
         counts = self.count_params()
         print("=" * 60)
@@ -191,6 +195,10 @@ class LoRaDAModel(nn.Module):
             "daa_params": count_daa_params(self.base_model),
         }
     
+    def get_trainable_params(self):
+        """Return list of trainable parameters for gradient clipping."""
+        return [p for p in self.parameters() if p.requires_grad]
+    
     def print_trainable_params(self):
         counts = self.count_params()
         print("=" * 60)
@@ -288,6 +296,10 @@ class LongLoRAModel(nn.Module):
             "norm_params": norm_params,
         }
     
+    def get_trainable_params(self):
+        """Return list of trainable parameters for gradient clipping."""
+        return [p for p in self.parameters() if p.requires_grad]
+    
     def print_trainable_params(self):
         counts = self.count_params()
         print("=" * 60)
@@ -365,6 +377,10 @@ class SparseAdapterModel(nn.Module):
             "trainable_ratio": trainable / max(total, 1),
             "sparse_params": count_sparse_params(self.base_model),
         }
+    
+    def get_trainable_params(self):
+        """Return list of trainable parameters for gradient clipping."""
+        return [p for p in self.parameters() if p.requires_grad]
     
     def print_trainable_params(self):
         counts = self.count_params()

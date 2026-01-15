@@ -329,8 +329,19 @@ class HyLoRADATrainer:
         checkpoint_dir = os.path.join(self.config.output_dir, name)
         os.makedirs(checkpoint_dir, exist_ok=True)
         
-        # Save HyLoRADA weights
-        self.model.save_hylorada(os.path.join(checkpoint_dir, "hylorada_weights.pt"))
+        # Save adapter weights (works for both HyLoRADA and baseline models)
+        if hasattr(self.model, 'save_hylorada'):
+            self.model.save_hylorada(os.path.join(checkpoint_dir, "hylorada_weights.pt"))
+            print(f"Saved HyLoRADA weights to {os.path.join(checkpoint_dir, 'hylorada_weights.pt')}")
+        elif hasattr(self.model, 'save_adapter'):
+            self.model.save_adapter(os.path.join(checkpoint_dir, "adapter_weights.pt"))
+        else:
+            # Fallback: save full trainable state dict
+            trainable_state = {
+                name: param for name, param in self.model.state_dict().items()
+                if any(p.data_ptr() == param.data_ptr() for p in self.model.parameters() if p.requires_grad)
+            }
+            torch.save(trainable_state, os.path.join(checkpoint_dir, "trainable_weights.pt"))
         
         # Save training state
         training_state = {
@@ -342,9 +353,13 @@ class HyLoRADATrainer:
         torch.save(training_state, os.path.join(checkpoint_dir, "training_state.pt"))
         
         # Save config
+        model_config = {}
+        if hasattr(self.model, 'config') and hasattr(self.model.config, 'to_dict'):
+            model_config = self.model.config.to_dict()
+        
         with open(os.path.join(checkpoint_dir, "config.json"), "w") as f:
             json.dump({
-                "hylorada_config": self.model.config.to_dict(),
+                "model_config": model_config,
                 "training_config": {
                     "num_epochs": self.config.num_epochs,
                     "learning_rate": self.config.learning_rate,
@@ -356,8 +371,21 @@ class HyLoRADATrainer:
     
     def load_checkpoint(self, checkpoint_dir: str):
         """Load a training checkpoint."""
-        # Load HyLoRADA weights
-        self.model.load_hylorada(os.path.join(checkpoint_dir, "hylorada_weights.pt"))
+        # Load adapter weights (works for both HyLoRADA and baseline models)
+        if hasattr(self.model, 'load_hylorada'):
+            weights_path = os.path.join(checkpoint_dir, "hylorada_weights.pt")
+            if os.path.exists(weights_path):
+                self.model.load_hylorada(weights_path)
+        elif hasattr(self.model, 'load_adapter'):
+            weights_path = os.path.join(checkpoint_dir, "adapter_weights.pt")
+            if os.path.exists(weights_path):
+                self.model.load_adapter(weights_path)
+        else:
+            # Fallback: load trainable weights
+            weights_path = os.path.join(checkpoint_dir, "trainable_weights.pt")
+            if os.path.exists(weights_path):
+                trainable_state = torch.load(weights_path, map_location=self.device)
+                self.model.load_state_dict(trainable_state, strict=False)
         
         # Load training state
         training_state = torch.load(

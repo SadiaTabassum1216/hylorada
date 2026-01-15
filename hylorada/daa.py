@@ -160,6 +160,16 @@ class PositionalDAA(nn.Module):
         self.position_bias = nn.Embedding(num_buckets, head_dim)
         nn.init.zeros_(self.position_bias.weight)
     
+    @property
+    def alpha(self):
+        """Delegate alpha to base_daa for compatibility."""
+        return self.base_daa.alpha
+    
+    @property
+    def beta(self):
+        """Delegate beta to base_daa for compatibility."""
+        return self.base_daa.beta
+    
     def _relative_position_bucket(
         self,
         relative_position: torch.Tensor,

@@ -36,7 +36,7 @@ from hylorada.baselines import (
     get_baseline_model,
 )
 from hylorada.trainer import HyLoRADATrainer, TrainingConfig
-from hylorada.evaluation import evaluate_perplexity, evaluate_lost_in_middle
+from hylorada.evaluation import evaluate_perplexity, evaluate_lost_in_the_middle
 
 
 def parse_args():
@@ -53,7 +53,22 @@ def parse_args():
                         default=["baseline", "lora", "lorada", "longlora", "sparse", "hylorada"],
                         help="Methods to compare")
     parser.add_argument("--lora_rank", type=int, default=8)
-    return parser.parse_args()
+    parser.add_argument("--quick-test", action="store_true",
+                        help="Quick test mode: 10 train samples, 1 epoch, skip eval")
+    args = parser.parse_args()
+    
+    # Override settings for quick test
+    if getattr(args, 'quick_test', False):
+        args.num_epochs = 1
+        args.gradient_accumulation = 1  # Just 1 step
+        args.num_train_samples = 10  # Very few samples
+        args.skip_eval = True
+        print("*** QUICK TEST MODE: 10 samples, 1 epoch, no eval ***")
+    else:
+        args.num_train_samples = 1000
+        args.skip_eval = False
+    
+    return args
 
 
 def load_model_fresh(model_name: str, device: str):
@@ -88,43 +103,52 @@ def prepare_data(tokenizer, max_length: int, num_samples: int = 1000):
 
 def train_model(model, tokenizer, train_texts, args, method_name: str):
     """Train a model using the HyLoRADA trainer."""
+    from hylorada.trainer import create_long_context_dataloader
+    
+    # Create dataloader from train texts
+    train_dataloader = create_long_context_dataloader(
+        dataset=train_texts,
+        tokenizer=tokenizer,
+        max_length=args.max_length,
+        batch_size=args.batch_size,
+    )
+    
     train_config = TrainingConfig(
         num_epochs=args.num_epochs,
-        batch_size=args.batch_size,
+        per_device_batch_size=args.batch_size,  # Correct field name
         learning_rate=args.learning_rate,
         gradient_accumulation_steps=args.gradient_accumulation,
-        max_length=args.max_length,
         warmup_ratio=0.03,
         logging_steps=50,
     )
     
     trainer = HyLoRADATrainer(
         model=model,
-        tokenizer=tokenizer,
+        train_dataloader=train_dataloader,  # Pass dataloader, not tokenizer
         config=train_config,
     )
     
     print(f"\n  Training {method_name}...")
     start_time = time.time()
-    trainer.train(train_texts)
+    trainer.train()  # No arguments needed - dataloader is passed to constructor
     train_time = time.time() - start_time
     
     return model, train_time
 
 
-def evaluate_model(model, tokenizer, test_texts, max_length: int, device: str):
+def evaluate_model(model, tokenizer, test_texts, max_length: int):
     """Evaluate a model on perplexity and lost-in-middle metrics."""
     results = {}
     
     # Perplexity
     print("    Evaluating perplexity...")
-    ppl = evaluate_perplexity(model, tokenizer, test_texts, max_length, device)
+    ppl = evaluate_perplexity(model, tokenizer, test_texts, max_length=max_length)
     results["perplexity"] = ppl
     
     # Lost-in-Middle (if sequence is long enough)
     if max_length >= 512:
         print("    Evaluating lost-in-middle...")
-        lim_results = evaluate_lost_in_middle(model, tokenizer, test_texts[:20], max_length, device)
+        lim_results = evaluate_lost_in_the_middle(model, tokenizer, test_texts[:20], max_length=max_length)
         results["lost_in_middle"] = lim_results
     
     return results
@@ -156,7 +180,7 @@ def run_comparison(args):
     
     # Prepare data
     print("\n[2] Preparing data...")
-    train_texts, test_texts = prepare_data(tokenizer, args.max_length)
+    train_texts, test_texts = prepare_data(tokenizer, args.max_length, args.num_train_samples)
     print(f"    Train samples: {len(train_texts)}, Test samples: {len(test_texts)}")
     
     # Results storage
@@ -230,19 +254,28 @@ def run_comparison(args):
                 print(f"  Unknown method: {method}, skipping...")
                 continue
             
-            # Evaluate
-            print(f"  Evaluating {method}...")
-            eval_results = evaluate_model(model, tokenizer, test_texts, args.max_length, device)
-            
-            all_results[method] = {
-                "trainable_params": trainable_params,
-                "train_time_seconds": train_time,
-                "perplexity": eval_results.get("perplexity", None),
-                "lost_in_middle": eval_results.get("lost_in_middle", None),
-            }
-            
-            print(f"  ✓ {method}: PPL={eval_results.get('perplexity', 'N/A'):.2f}, "
-                  f"Params={trainable_params:,}, Time={train_time:.1f}s")
+            # Evaluate (skip in quick test mode)
+            if args.skip_eval:
+                print(f"  ✓ {method}: Training complete (eval skipped), Params={trainable_params:,}, Time={train_time:.1f}s")
+                all_results[method] = {
+                    "trainable_params": trainable_params,
+                    "train_time_seconds": train_time,
+                    "perplexity": None,
+                    "lost_in_middle": None,
+                }
+            else:
+                print(f"  Evaluating {method}...")
+                eval_results = evaluate_model(model, tokenizer, test_texts, args.max_length)
+                
+                all_results[method] = {
+                    "trainable_params": trainable_params,
+                    "train_time_seconds": train_time,
+                    "perplexity": eval_results.get("perplexity", None),
+                    "lost_in_middle": eval_results.get("lost_in_middle", None),
+                }
+                
+                print(f"  ✓ {method}: PPL={eval_results.get('perplexity', 'N/A'):.2f}, "
+                      f"Params={trainable_params:,}, Time={train_time:.1f}s")
             
         except Exception as e:
             print(f"  ✗ Error with {method}: {e}")
