@@ -267,14 +267,25 @@ def run_comparison(args):
                 print(f"  Evaluating {method}...")
                 eval_results = evaluate_model(model, tokenizer, test_texts, args.max_length)
                 
+                # Extract perplexity value from EvaluationResult object
+                ppl_result = eval_results.get("perplexity", None)
+                ppl_value = ppl_result.perplexity if ppl_result else None
+                
+                lim_result = eval_results.get("lost_in_middle", None)
+                lim_data = {
+                    "perplexity": lim_result.perplexity,
+                    "position_perplexities": lim_result.position_perplexities,
+                } if lim_result else None
+                
                 all_results[method] = {
                     "trainable_params": trainable_params,
                     "train_time_seconds": train_time,
-                    "perplexity": eval_results.get("perplexity", None),
-                    "lost_in_middle": eval_results.get("lost_in_middle", None),
+                    "perplexity": ppl_value,
+                    "lost_in_middle": lim_data,
                 }
                 
-                print(f"  ✓ {method}: PPL={eval_results.get('perplexity', 'N/A'):.2f}, "
+                ppl_str = f"{ppl_value:.2f}" if ppl_value else "N/A"
+                print(f"  ✓ {method}: PPL={ppl_str}, "
                       f"Params={trainable_params:,}, Time={train_time:.1f}s")
             
         except Exception as e:
