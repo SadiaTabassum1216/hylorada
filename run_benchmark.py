@@ -197,6 +197,16 @@ def main():
                 params = model.count_params()["trainable_params"]
                 train_time = train_model(model, tokenizer, train_texts, args, "HyLoRADA-Lite")
             
+            elif method == "hylorada-pro":
+                from hylorada.config import HyLoRADAPresets
+                config = HyLoRADAPresets.pro()
+                config.lora_rank = args.lora_rank
+                config.lora_alpha = args.lora_rank * 2
+                model = HyLoRADAModel(base_model, config)
+                model.print_trainable_params()
+                params = model.count_params()["trainable_params"]
+                train_time = train_model(model, tokenizer, train_texts, args, "HyLoRADA-Pro")
+            
             else:
                 print(f"  Unknown method: {method}")
                 continue

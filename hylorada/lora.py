@@ -295,3 +295,131 @@ def merge_lora_weights(model: nn.Module) -> nn.Module:
             setattr(parent, child_name, merged)
     
     return model
+
+
+def compute_layer_ranks(
+    num_layers: int,
+    base_rank: int = 8,
+    strategy: str = "importance",
+) -> Dict[int, int]:
+    """
+    Compute per-layer LoRA ranks based on layer importance.
+    
+    Research shows early and late layers matter more for adaptation,
+    while middle layers can use lower rank with minimal accuracy loss.
+    
+    Args:
+        num_layers: Total number of transformer layers
+        base_rank: Base rank to scale from
+        strategy: "importance" (high at edges), "uniform" (same rank), 
+                  or "decreasing" (higher early, lower late)
+    
+    Returns:
+        Dictionary mapping layer index to rank
+    """
+    layer_ranks = {}
+    
+    if strategy == "uniform":
+        return {i: base_rank for i in range(num_layers)}
+    
+    elif strategy == "importance":
+        # U-shaped: high at start and end, low in middle
+        # Based on layer importance analysis from LoRA papers
+        for i in range(num_layers):
+            # Distance from edges (0 = edge, 0.5 = middle)
+            distance_from_edge = min(i, num_layers - 1 - i) / (num_layers / 2)
+            # Scale: 1.0 at edges, 0.5 at middle
+            scale = 1.0 - 0.5 * distance_from_edge
+            layer_ranks[i] = max(2, int(base_rank * scale))
+    
+    elif strategy == "decreasing":
+        # Higher rank at early layers, lower at late
+        for i in range(num_layers):
+            scale = 1.0 - 0.5 * (i / (num_layers - 1))
+            layer_ranks[i] = max(2, int(base_rank * scale))
+    
+    return layer_ranks
+
+
+def apply_lora_with_layer_ranks(
+    model: nn.Module,
+    target_modules: Tuple[str, ...] = ("q_proj", "v_proj"),
+    layer_ranks: Optional[Dict[int, int]] = None,
+    base_rank: int = 8,
+    alpha_ratio: float = 2.0,
+    dropout: float = 0.0,
+    rank_strategy: str = "importance",
+) -> Tuple[nn.Module, Dict[str, LoRALayer]]:
+    """
+    Apply LoRA with layer-wise rank allocation.
+    
+    This is more parameter-efficient than uniform rank, allocating
+    more capacity to important layers (early/late) and less to middle.
+    
+    Args:
+        model: The model to modify
+        target_modules: Module names to apply LoRA to
+        layer_ranks: Optional custom per-layer ranks (overrides strategy)
+        base_rank: Base rank for rank computation
+        alpha_ratio: Alpha = rank * alpha_ratio
+        dropout: LoRA dropout
+        rank_strategy: "importance", "uniform", or "decreasing"
+        
+    Returns:
+        Tuple of (modified model, dict of LoRA layers)
+    """
+    # Detect number of layers
+    num_layers = 0
+    for name, _ in model.named_modules():
+        # Look for layer patterns like "layers.0", "h.0", "blocks.0"
+        for pattern in ["layers.", "h.", "blocks.", "decoder.layers."]:
+            if pattern in name:
+                try:
+                    idx = int(name.split(pattern)[1].split(".")[0])
+                    num_layers = max(num_layers, idx + 1)
+                except (IndexError, ValueError):
+                    pass
+    
+    if num_layers == 0:
+        # Fallback to uniform rank
+        return apply_lora_to_model(model, target_modules, base_rank, 
+                                    base_rank * alpha_ratio, dropout)
+    
+    # Compute layer ranks if not provided
+    if layer_ranks is None:
+        layer_ranks = compute_layer_ranks(num_layers, base_rank, rank_strategy)
+    
+    lora_layers = {}
+    targets = find_target_modules(model, target_modules)
+    
+    for name, module in targets.items():
+        # Extract layer index from name
+        layer_idx = None
+        for pattern in ["layers.", "h.", "blocks.", "decoder.layers."]:
+            if pattern in name:
+                try:
+                    layer_idx = int(name.split(pattern)[1].split(".")[0])
+                    break
+                except (IndexError, ValueError):
+                    pass
+        
+        # Get rank for this layer
+        rank = layer_ranks.get(layer_idx, base_rank) if layer_idx is not None else base_rank
+        alpha = rank * alpha_ratio
+        
+        # Create LoRA wrapper
+        lora_layer = LoRALayer(
+            base_layer=module,
+            rank=rank,
+            alpha=alpha,
+            dropout=dropout,
+        )
+        
+        # Replace module in parent
+        parent_name, child_name = name.rsplit(".", 1) if "." in name else ("", name)
+        parent = model.get_submodule(parent_name) if parent_name else model
+        setattr(parent, child_name, lora_layer)
+        
+        lora_layers[name] = lora_layer
+    
+    return model, lora_layers

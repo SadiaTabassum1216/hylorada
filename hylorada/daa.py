@@ -121,6 +121,116 @@ class DirectAttentionAdapter(nn.Module):
         )
 
 
+class ContentAwareDAA(nn.Module):
+    """
+    Content-Aware Direct Attention Adaptation.
+    
+    Unlike static DAA which learns fixed α, β per head, this module
+    computes input-dependent α, β based on the hidden states.
+    
+    This allows the model to dynamically adjust attention based on:
+    - Content type (factual vs narrative)
+    - Query complexity
+    - Context relevance
+    
+    Args:
+        hidden_size: Model hidden dimension
+        num_heads: Number of attention heads
+        init_alpha: Initial bias for alpha (default 1.0 for identity)
+        init_beta: Initial bias for beta (default 0.0)
+    """
+    
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        init_alpha: float = 1.0,
+        init_beta: float = 0.0,
+    ):
+        super().__init__()
+        
+        self.hidden_size = hidden_size
+        self.num_heads = num_heads
+        
+        # Project hidden states to per-head alpha and beta
+        # Use small intermediate dim for efficiency
+        intermediate_dim = max(64, num_heads * 2)
+        
+        self.proj = nn.Sequential(
+            nn.Linear(hidden_size, intermediate_dim),
+            nn.GELU(),
+            nn.Linear(intermediate_dim, num_heads * 2),  # alpha + beta
+        )
+        
+        # Initialize to output ~(1.0, 0.0) at start
+        nn.init.zeros_(self.proj[-1].weight)
+        nn.init.constant_(self.proj[-1].bias[:num_heads], init_alpha)
+        nn.init.constant_(self.proj[-1].bias[num_heads:], init_beta)
+        
+        # Fallback static parameters (for compatibility)
+        self.register_buffer("_static_alpha", torch.full((num_heads,), init_alpha))
+        self.register_buffer("_static_beta", torch.full((num_heads,), init_beta))
+    
+    @property
+    def alpha(self):
+        """Static alpha for compatibility with existing code."""
+        return self._static_alpha
+    
+    @property
+    def beta(self):
+        """Static beta for compatibility with existing code."""
+        return self._static_beta
+    
+    def forward(
+        self,
+        attention_scores: torch.Tensor,
+        hidden_states: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Apply content-aware attention adaptation.
+        
+        Args:
+            attention_scores: [batch, heads, seq_q, seq_k]
+            hidden_states: [batch, seq, hidden_size] - input for computing α, β
+            attention_mask: Optional attention mask
+            
+        Returns:
+            Adapted attention scores
+        """
+        batch_size, num_heads, seq_q, seq_k = attention_scores.shape
+        
+        if hidden_states is not None:
+            # Ensure hidden_states matches input device/dtype
+            if hidden_states.device != self.proj[0].weight.device:
+                hidden_states = hidden_states.to(self.proj[0].weight.device)
+            if hidden_states.dtype != self.proj[0].weight.dtype:
+                hidden_states = hidden_states.to(self.proj[0].weight.dtype)
+            
+            # Pool over sequence dimension (mean pooling)
+            pooled = hidden_states.mean(dim=1)  # [batch, hidden_size]
+            
+            # Compute content-aware alpha and beta
+            ab = self.proj(pooled)  # [batch, num_heads * 2]
+            alpha = ab[:, :self.num_heads].view(batch_size, num_heads, 1, 1)
+            beta = ab[:, self.num_heads:].view(batch_size, num_heads, 1, 1)
+        else:
+            # Fallback to static parameters
+            alpha = self._static_alpha.view(1, -1, 1, 1)
+            beta = self._static_beta.view(1, -1, 1, 1)
+        
+        # Apply adaptation: attn' = α * attn + β
+        adapted_scores = alpha * attention_scores + beta
+        
+        if attention_mask is not None:
+            adapted_scores = adapted_scores + attention_mask
+        
+        return adapted_scores
+    
+    def extra_repr(self) -> str:
+        return f"hidden_size={self.hidden_size}, num_heads={self.num_heads}"
+
+
 class PositionalDAA(nn.Module):
     """
     Extended DAA with position-aware adaptation.
@@ -290,7 +400,7 @@ def get_daa_params(model: nn.Module) -> list:
     """Get all DAA parameters from a model."""
     params = []
     for module in model.modules():
-        if isinstance(module, (DirectAttentionAdapter, PositionalDAA)):
+        if isinstance(module, (DirectAttentionAdapter, PositionalDAA, ContentAwareDAA)):
             params.extend(module.parameters())
     return params
 

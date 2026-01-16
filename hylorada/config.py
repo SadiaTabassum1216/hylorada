@@ -54,6 +54,9 @@ class HyLoRADAConfig:
     # Supports: LLaMA (q_proj, k_proj, v_proj, o_proj), GPT-2 (c_attn, c_proj), Falcon (query_key_value)
     # Added k_proj and o_proj for better coverage of attention mechanism
     lora_target_modules: Tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj", "c_attn", "c_proj", "query_key_value")
+    # Layer-wise rank allocation: allocates higher rank to important layers (early/late)
+    lora_layerwise_rank: bool = False  # Enable layer-wise rank allocation
+    lora_rank_strategy: str = "importance"  # "importance", "uniform", or "decreasing"
     
     # ============ DAA Settings (Noise Filtering) ============
     daa_enabled: bool = True
@@ -63,6 +66,8 @@ class HyLoRADAConfig:
     # PositionalDAA: Uses position-aware biases to address Lost-in-the-Middle phenomenon
     daa_use_positional: bool = True  # Enable PositionalDAA for better long-context handling
     daa_num_buckets: int = 64  # Number of relative position buckets
+    # Content-aware DAA: learns input-dependent α, β instead of static values
+    daa_content_aware: bool = False  # Enable content-aware adaptation
     
     # ============ Sparse MLP Settings (Local Precision) ============
     # Large-Sparse strategy (from SparseAdapter paper): larger adapter with higher sparsity
@@ -88,6 +93,10 @@ class HyLoRADAConfig:
     gradient_checkpointing: bool = True
     mixed_precision: str = "bf16"  # "fp16", "bf16", or "fp32"
     max_sequence_length: int = 32768
+    
+    # ============ Advanced Accuracy Settings ============
+    # Trainable LayerNorms: LongLoRA finding - norms matter for adaptation
+    trainable_norms: bool = False  # Unfreeze layer norms (adds ~50K params)
     
     def __post_init__(self):
         """Validate configuration after initialization."""
@@ -191,6 +200,43 @@ class HyLoRADAPresets:
             budget_lora=0.5,
             budget_daa=0.15,
             budget_sparse=0.35,
+        )
+    
+    @staticmethod
+    def pro() -> HyLoRADAConfig:
+        """Pro config for maximum accuracy with minimal parameter overhead.
+        
+        Enables all three accuracy improvements:
+        - Layer-wise LoRA rank (high at edges, low in middle)
+        - Content-aware DAA (input-dependent α, β)
+        - Trainable LayerNorms (LongLoRA finding)
+        
+        Disables Sparse MLP as it doesn't help at small scales.
+        
+        Expected: ~1.2M params, ~24.5 PPL (matching LoRaDA with improvements)
+        """
+        return HyLoRADAConfig(
+            # LoRA with layer-wise rank
+            lora_rank=8,
+            lora_alpha=16.0,
+            lora_layerwise_rank=True,
+            lora_rank_strategy="importance",
+            
+            # Content-aware DAA
+            daa_enabled=True,
+            daa_content_aware=True,
+            daa_use_positional=False,  # Content-aware takes priority
+            
+            # Disable sparse (doesn't help at low param budget)
+            sparse_enabled=False,
+            
+            # Trainable norms
+            trainable_norms=True,
+            
+            # Adjusted budget since sparse is disabled
+            budget_lora=0.85,
+            budget_daa=0.15,
+            budget_sparse=0.0,
         )
     
     @staticmethod
