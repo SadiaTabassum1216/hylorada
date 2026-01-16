@@ -171,18 +171,33 @@ def main():
                 train_time = train_model(model, tokenizer, train_texts, args, "DoRA")
             
             elif method == "hylorada":
-                # HyLoRADA: Novel method with orthogonal init + gated magnitude + residual LoRA
+                # HyLoRADA: Novel method with all optimizations
+                # - Orthogonal init (prevents rank collapse)
+                # - Gated magnitude (learnable magnitude control)
+                # - Residual LoRA path (blends DoRA + LoRA dynamics)
+                # - LoRA+ (asymmetric learning rates)
                 config = HyLoRADAConfig(
                     lora_rank=args.lora_rank,
-                    lora_alpha=args.lora_rank * 2,
+                    lora_alpha=args.lora_rank * 2.5,  # Slightly higher alpha
+                    lora_dropout=0.05,
                     use_hylorada=True,  # Our novel method
-                    daa_enabled=False,  # Pure HyLoRADA without DAA
+                    lora_plus_enabled=True,  # Enable LoRA+ LR
+                    lora_plus_ratio=10.0,  # 10x LR for B matrix
+                    daa_enabled=False,
                     sparse_enabled=False,
                     budget_lora=1.0,
                     budget_daa=0.0,
                     budget_sparse=0.0,
                 )
                 model = HyLoRADAModel(base_model, config)
+                
+                # Adjust gate initialization (biased toward DoRA)
+                for module in model.modules():
+                    if hasattr(module, 'magnitude_gate'):
+                        module.magnitude_gate.data.fill_(-0.5)  # sigmoid(-0.5) ≈ 0.38
+                    if hasattr(module, 'residual_weight'):
+                        module.residual_weight.data.fill_(0.2)  # Start with 55% DoRA
+                
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]
                 train_time = train_model(model, tokenizer, train_texts, args, "HyLoRADA")
