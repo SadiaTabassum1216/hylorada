@@ -114,22 +114,48 @@ def create_model_and_train(
         num_epochs=epochs,
         per_device_batch_size=2,
         gradient_accumulation_steps=4,
-        max_length=max_length,
         warmup_ratio=0.1,
         weight_decay=0.01,
     )
     
-    # Train
-    trainer = HyLoRADATrainer(model, train_config, tokenizer)
+    # Create simple dataloaders
+    from torch.utils.data import DataLoader, Dataset
     
-    # Create dataloaders
-    train_loader = trainer.create_dataloader(train_texts)
-    val_loader = trainer.create_dataloader(val_texts)
+    class TextDataset(Dataset):
+        def __init__(self, texts, tokenizer, max_length=512):
+            self.encodings = tokenizer(
+                texts, truncation=True, padding="max_length",
+                max_length=max_length, return_tensors="pt"
+            )
+        
+        def __len__(self):
+            return len(self.encodings.input_ids)
+        
+        def __getitem__(self, idx):
+            return {
+                "input_ids": self.encodings.input_ids[idx],
+                "attention_mask": self.encodings.attention_mask[idx],
+                "labels": self.encodings.input_ids[idx],
+            }
+    
+    train_dataset = TextDataset(train_texts, tokenizer, max_length)
+    val_dataset = TextDataset(val_texts, tokenizer, max_length)
+    
+    train_loader = DataLoader(train_dataset, batch_size=2, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=2, shuffle=False)
+    
+    # Create trainer with correct argument order
+    trainer = HyLoRADATrainer(
+        model=model,
+        train_dataloader=train_loader,
+        eval_dataloader=val_loader,
+        config=train_config,
+    )
     
     # Train and get final loss
     try:
-        trainer.train(train_loader, val_loader)
-        final_loss = trainer.best_val_loss
+        trainer.train()
+        final_loss = trainer.best_eval_loss
     except Exception as e:
         print(f"Training failed: {e}")
         return float('inf')
