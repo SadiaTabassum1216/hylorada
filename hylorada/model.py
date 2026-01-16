@@ -17,8 +17,9 @@ from dataclasses import dataclass
 
 from .config import HyLoRADAConfig
 from .lora import (
-    LoRALayer, DoRALayer,
+    LoRALayer, DoRALayer, HyLoRADALayer,
     apply_lora_to_model, apply_lora_with_layer_ranks, apply_dora_to_model,
+    apply_hylorada_adapter_to_model,
     count_lora_params, merge_lora_weights, get_lora_plus_param_groups,
 )
 from .daa import DirectAttentionAdapter, PositionalDAA, ContentAwareDAA, apply_daa_to_attention, count_daa_params
@@ -113,8 +114,17 @@ class HyLoRADAModel(nn.Module):
     
     def _apply_hylorada(self):
         """Apply all HyLoRADA components to the model."""
-        # 1. Apply LoRA/DoRA adapters
-        if self.config.use_dora:
+        # 1. Apply LoRA/DoRA/HyLoRADA adapters
+        if self.config.use_hylorada:
+            # Use HyLoRADA (our novel method)
+            self.base_model, self.state.lora_layers = apply_hylorada_adapter_to_model(
+                model=self.base_model,
+                target_modules=self.config.lora_target_modules,
+                rank=self.config.lora_rank,
+                alpha=self.config.lora_alpha,
+                dropout=self.config.lora_dropout,
+            )
+        elif self.config.use_dora:
             # Use DoRA (Weight-Decomposed LoRA)
             self.base_model, self.state.lora_layers = apply_dora_to_model(
                 model=self.base_model,

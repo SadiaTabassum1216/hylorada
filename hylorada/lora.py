@@ -245,6 +245,142 @@ class DoRALinear(nn.Module):
         )
 
 
+class HyLoRADALinear(nn.Module):
+    """
+    HyLoRADA: Hybrid Low-Rank Direct Attention Adaptation.
+    
+    Novel contributions over DoRA:
+    1. Orthogonal initialization for A matrix (prevents rank collapse)
+    2. Gated magnitude (learnable gate controls magnitude contribution)
+    3. Residual LoRA path (combines DoRA and LoRA learning dynamics)
+    
+    The formulation is:
+        output = gate * DoRA_output + (1 - gate) * LoRA_output
+    
+    where:
+        - DoRA_output uses magnitude-direction decomposition
+        - LoRA_output is standard low-rank adaptation
+        - gate is a learnable per-layer scalar
+    
+    This hybrid approach leverages the strengths of both methods.
+    
+    Args:
+        in_features: Input dimension
+        out_features: Output dimension
+        rank: Rank of the low-rank decomposition
+        alpha: Scaling factor
+        dropout: Dropout probability
+    """
+    
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        rank: int = 8,
+        alpha: float = 16.0,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        
+        self.in_features = in_features
+        self.out_features = out_features
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+        
+        # LoRA matrices with ORTHOGONAL initialization for A (Novel 1)
+        self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        
+        # Learnable magnitude vector (from DoRA)
+        self.magnitude = nn.Parameter(torch.ones(out_features))
+        
+        # GATED magnitude control (Novel 2) - starts at 0.5
+        self.magnitude_gate = nn.Parameter(torch.tensor(0.0))  # sigmoid(0) = 0.5
+        
+        # RESIDUAL LoRA weight (Novel 3) - learnable blend between DoRA and LoRA
+        self.residual_weight = nn.Parameter(torch.tensor(0.1))  # Start with mostly DoRA
+        
+        # Dropout
+        self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
+        
+        # Cache for base weight
+        self.register_buffer("base_weight_norm", None)
+        
+        # Initialize with ORTHOGONAL (Novel improvement over Kaiming)
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """Initialize with orthogonal A matrix (prevents rank collapse)."""
+        # Orthogonal initialization for A - key improvement
+        nn.init.orthogonal_(self.lora_A)
+        # Zero init for B (standard)
+        nn.init.zeros_(self.lora_B)
+    
+    def init_magnitude(self, base_weight: torch.Tensor):
+        """Initialize magnitude from base weight norms."""
+        weight_norm = base_weight.norm(p=2, dim=1)
+        self.magnitude.data = weight_norm.clone()
+        self.register_buffer("base_weight_norm", weight_norm.clone())
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        base_output: torch.Tensor,
+        base_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Apply HyLoRADA adaptation with gated magnitude and residual LoRA.
+        
+        Args:
+            x: Input tensor [batch, seq, in_features]
+            base_output: Output from frozen base layer
+            base_weight: The frozen base weight matrix
+            
+        Returns:
+            HyLoRADA-adapted output
+        """
+        input_dtype = x.dtype
+        x_float = x.to(self.lora_A.dtype)
+        
+        # Compute LoRA contribution (shared between DoRA and residual path)
+        lora_x = self.dropout(x_float)
+        lora_x = F.linear(lora_x, self.lora_A)  # [batch, seq, rank]
+        lora_out = F.linear(lora_x, self.lora_B)  # [batch, seq, out_features]
+        delta_v = lora_out * self.scaling
+        
+        # === DoRA PATH ===
+        # Compute magnitude-weighted direction
+        updated_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling
+        updated_norm = updated_weight.norm(p=2, dim=1) + 1e-8
+        
+        # Apply GATED magnitude (Novel 2)
+        gate = torch.sigmoid(self.magnitude_gate)  # [0, 1]
+        effective_magnitude = self.magnitude * gate + self.base_weight_norm * (1 - gate)
+        
+        mag_scale = effective_magnitude / updated_norm
+        dora_output = (base_output.to(self.lora_A.dtype) + delta_v) * mag_scale.unsqueeze(0).unsqueeze(0)
+        
+        # === RESIDUAL LoRA PATH (Novel 3) ===
+        lora_output = base_output.to(self.lora_A.dtype) + delta_v
+        
+        # Blend DoRA and LoRA with learnable weight
+        residual_w = torch.sigmoid(self.residual_weight)  # [0, 1]
+        final_output = (1 - residual_w) * dora_output + residual_w * lora_output
+        
+        return final_output.to(input_dtype)
+    
+    def get_delta_weight(self) -> torch.Tensor:
+        """Compute the LoRA weight delta."""
+        return (self.lora_B @ self.lora_A) * self.scaling
+    
+    def extra_repr(self) -> str:
+        return (
+            f"in_features={self.in_features}, out_features={self.out_features}, "
+            f"rank={self.rank}, alpha={self.alpha}, hylorada=True"
+        )
+
+
 class LoRALayer(nn.Module):
     """
     Wrapper that combines a frozen base linear layer with LoRA adapter.
@@ -375,6 +511,69 @@ class DoRALayer(nn.Module):
     def weight(self) -> torch.Tensor:
         """Return effective weight for compatibility."""
         return self._base_weight + self.dora.get_delta_weight()
+
+
+class HyLoRADALayer(nn.Module):
+    """
+    HyLoRADA wrapper that combines frozen base layer with HyLoRADA adapter.
+    
+    This is the main wrapper class for applying HyLoRADA to models.
+    Uses orthogonal init, gated magnitude, and residual LoRA path.
+    """
+    
+    def __init__(
+        self,
+        base_layer: nn.Module,
+        rank: int = 8,
+        alpha: float = 16.0,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        
+        self.base_layer = base_layer
+        
+        # Handle both nn.Linear and Conv1D (GPT-2)
+        if hasattr(base_layer, 'nf'):  # Conv1D from transformers
+            in_features = base_layer.weight.shape[0]
+            out_features = base_layer.nf
+            self.is_conv1d = True
+            self._base_weight = base_layer.weight.T
+        else:  # nn.Linear
+            in_features = base_layer.in_features
+            out_features = base_layer.out_features
+            self.is_conv1d = False
+            self._base_weight = base_layer.weight
+        
+        self.hylorada = HyLoRADALinear(
+            in_features=in_features,
+            out_features=out_features,
+            rank=rank,
+            alpha=alpha,
+            dropout=dropout,
+        )
+        
+        # Initialize magnitude from base weights
+        with torch.no_grad():
+            self.hylorada.init_magnitude(self._base_weight.data.float())
+        
+        # Freeze base layer
+        for param in self.base_layer.parameters():
+            param.requires_grad = False
+    
+    @property
+    def lora(self):
+        """Compatibility property - returns the HyLoRADA module."""
+        return self.hylorada
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through frozen base + HyLoRADA adapter."""
+        base_out = self.base_layer(x)
+        return self.hylorada(x, base_out, self._base_weight)
+    
+    @property
+    def weight(self) -> torch.Tensor:
+        """Return effective weight for compatibility."""
+        return self._base_weight + self.hylorada.get_delta_weight()
 
 
 def _is_linear_layer(module: nn.Module) -> bool:
@@ -660,6 +859,53 @@ def apply_dora_to_model(
         dora_layers[name] = dora_layer
     
     return model, dora_layers
+
+
+def apply_hylorada_adapter_to_model(
+    model: nn.Module,
+    target_modules: Tuple[str, ...] = ("q_proj", "v_proj"),
+    rank: int = 8,
+    alpha: float = 16.0,
+    dropout: float = 0.0,
+) -> Tuple[nn.Module, Dict[str, HyLoRADALayer]]:
+    """
+    Apply HyLoRADA adapters to target modules in a model.
+    
+    HyLoRADA is a novel PEFT method combining:
+    1. Orthogonal initialization (prevents rank collapse)
+    2. Gated magnitude (learnable magnitude control)
+    3. Residual LoRA path (blends DoRA and LoRA dynamics)
+    
+    Args:
+        model: The model to modify (will be modified in-place)
+        target_modules: Names of modules to apply HyLoRADA to
+        rank: Rank for the low-rank matrices
+        alpha: Scaling factor
+        dropout: Dropout probability
+        
+    Returns:
+        Tuple of (modified model, dict of HyLoRADA layers)
+    """
+    hylorada_layers = {}
+    targets = find_target_modules(model, target_modules)
+    
+    for name, module in targets.items():
+        # Create HyLoRADA wrapper
+        hylorada_layer = HyLoRADALayer(
+            base_layer=module,
+            rank=rank,
+            alpha=alpha,
+            dropout=dropout,
+        )
+        
+        # Replace module in parent
+        parent_name, child_name = name.rsplit(".", 1) if "." in name else ("", name)
+        parent = model.get_submodule(parent_name) if parent_name else model
+        setattr(parent, child_name, hylorada_layer)
+        
+        hylorada_layers[name] = hylorada_layer
+    
+    return model, hylorada_layers
 
 
 def get_lora_plus_param_groups(

@@ -62,6 +62,9 @@ class HyLoRADAConfig:
     # Decomposes weight into magnitude + direction, applies LoRA to direction only
     use_dora: bool = False  # Enable DoRA instead of standard LoRA
     
+    # HyLoRADA: Novel method with orthogonal init + gated magnitude + residual LoRA
+    use_hylorada: bool = False  # Enable HyLoRADA (our novel method)
+    
     # LoRA+: Asymmetric learning rates (higher for B matrix)
     lora_plus_enabled: bool = False  # Enable LoRA+ learning rate scheduling
     lora_plus_ratio: float = 10.0  # lr_B / lr_A ratio (paper recommends 10)

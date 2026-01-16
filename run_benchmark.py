@@ -170,26 +170,22 @@ def main():
                 params = model.count_params()["trainable_params"]
                 train_time = train_model(model, tokenizer, train_texts, args, "DoRA")
             
-            elif method == "dora-plus":
-                # DoRA + LoRA+ (asymmetric LR) + trainable norms
+            elif method == "hylorada":
+                # HyLoRADA: Novel method with orthogonal init + gated magnitude + residual LoRA
                 config = HyLoRADAConfig(
                     lora_rank=args.lora_rank,
                     lora_alpha=args.lora_rank * 2,
-                    use_dora=True,
-                    lora_plus_enabled=True,
-                    lora_plus_ratio=10.0,
-                    daa_enabled=True,
-                    daa_use_positional=True,
-                    trainable_norms=True,
+                    use_hylorada=True,  # Our novel method
+                    daa_enabled=False,  # Pure HyLoRADA without DAA
                     sparse_enabled=False,
-                    budget_lora=0.9,
-                    budget_daa=0.1,
+                    budget_lora=1.0,
+                    budget_daa=0.0,
                     budget_sparse=0.0,
                 )
                 model = HyLoRADAModel(base_model, config)
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]
-                train_time = train_model(model, tokenizer, train_texts, args, "DoRA+")
+                train_time = train_model(model, tokenizer, train_texts, args, "HyLoRADA")
                 
             elif method == "lorada":
                 model = LoRaDAModel(base_model, baseline_config)
@@ -208,42 +204,6 @@ def main():
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]
                 train_time = train_model(model, tokenizer, train_texts, args, "SparseAdapter")
-                
-            elif method == "hylorada":
-                config = HyLoRADAConfig(
-                    lora_rank=args.lora_rank,
-                    lora_alpha=args.lora_rank * 2,
-                    daa_enabled=True,
-                    daa_use_positional=True,
-                    sparse_enabled=True,
-                    sparse_adapter_dim=args.sparse_dim,
-                    sparse_topk_ratio=0.05,
-                    sparse_target_layers=args.sparse_layers,
-                )
-                model = HyLoRADAModel(base_model, config)
-                model.print_trainable_params()
-                params = model.count_params()["trainable_params"]
-                train_time = train_model(model, tokenizer, train_texts, args, "HyLoRADA")
-            
-            elif method == "hylorada-lite":
-                from hylorada.config import HyLoRADAPresets
-                config = HyLoRADAPresets.lightweight()
-                config.lora_rank = args.lora_rank
-                config.lora_alpha = args.lora_rank * 2
-                model = HyLoRADAModel(base_model, config)
-                model.print_trainable_params()
-                params = model.count_params()["trainable_params"]
-                train_time = train_model(model, tokenizer, train_texts, args, "HyLoRADA-Lite")
-            
-            elif method == "hylorada-pro":
-                from hylorada.config import HyLoRADAPresets
-                config = HyLoRADAPresets.pro()
-                config.lora_rank = args.lora_rank
-                config.lora_alpha = args.lora_rank * 2
-                model = HyLoRADAModel(base_model, config)
-                model.print_trainable_params()
-                params = model.count_params()["trainable_params"]
-                train_time = train_model(model, tokenizer, train_texts, args, "HyLoRADA-Pro")
             
             else:
                 print(f"  Unknown method: {method}")
