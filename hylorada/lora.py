@@ -117,6 +117,134 @@ class LoRALinear(nn.Module):
         )
 
 
+class DoRALinear(nn.Module):
+    """
+    DoRA: Weight-Decomposed Low-Rank Adaptation.
+    
+    Based on: Liu et al., 2024 - "DoRA: Weight-Decomposed Low-Rank Adaptation"
+    
+    DoRA decomposes the pretrained weight W into magnitude (m) and direction (V):
+        W = m * (V / ||V||)
+    
+    Then applies LoRA only to the direction component:
+        W' = m' * ((V + ΔV) / ||V + ΔV||)
+    
+    where ΔV = B @ A (the LoRA update) and m' is a learnable magnitude.
+    
+    This decomposition helps because:
+    1. Magnitude and direction have different learning dynamics
+    2. Direction captures most of the task-specific information
+    3. Learning m' separately allows better adaptation
+    
+    Args:
+        in_features: Input dimension
+        out_features: Output dimension
+        rank: Rank of the low-rank decomposition
+        alpha: Scaling factor
+        dropout: Dropout probability
+    """
+    
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        rank: int = 8,
+        alpha: float = 16.0,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        
+        self.in_features = in_features
+        self.out_features = out_features
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+        
+        # LoRA matrices for direction update
+        self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        
+        # Learnable magnitude vector (one per output feature)
+        self.magnitude = nn.Parameter(torch.ones(out_features))
+        
+        # Dropout
+        self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
+        
+        # Cache for base weight norm (will be set when applied to layer)
+        self.register_buffer("base_weight_norm", None)
+        
+        # Initialize
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """Initialize LoRA matrices."""
+        nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+        nn.init.zeros_(self.lora_B)
+    
+    def init_magnitude(self, base_weight: torch.Tensor):
+        """Initialize magnitude from the base weight's column norms."""
+        # Compute column-wise L2 norm of base weight
+        # base_weight shape: [out_features, in_features]
+        weight_norm = base_weight.norm(p=2, dim=1)  # [out_features]
+        self.magnitude.data = weight_norm.clone()
+        self.register_buffer("base_weight_norm", weight_norm.clone())
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        base_output: torch.Tensor,
+        base_weight: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Apply DoRA adaptation.
+        
+        Args:
+            x: Input tensor [batch, seq, in_features]
+            base_output: Output from frozen base layer
+            base_weight: The frozen base weight matrix
+            
+        Returns:
+            DoRA-adapted output
+        """
+        input_dtype = x.dtype
+        
+        # Compute LoRA delta: ΔV = B @ A
+        x_float = x.to(self.lora_A.dtype)
+        lora_out = self.dropout(x_float)
+        lora_out = F.linear(lora_out, self.lora_A)  # [batch, seq, rank]
+        lora_out = F.linear(lora_out, self.lora_B)  # [batch, seq, out_features]
+        delta_v = lora_out * self.scaling
+        
+        # Compute updated direction norm: ||V + ΔV||
+        # V is the base weight, ΔV is the LoRA contribution
+        # We need: V + ΔV = base_weight + scaling * B @ A
+        updated_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling
+        updated_norm = updated_weight.norm(p=2, dim=1, keepdim=True).T  # [1, out_features]
+        
+        # Compute the magnitude scaling factor
+        # m' / ||V + ΔV||
+        mag_scale = (self.magnitude / (updated_norm.squeeze() + 1e-8))  # [out_features]
+        
+        # Apply DoRA: output = (base_output + delta_v) * (m' / ||V + ΔV||) * ||V|| / m_init
+        # Simplified: we scale the combined output by the magnitude ratio
+        combined = base_output.to(self.lora_A.dtype) + delta_v
+        
+        # Scale by magnitude (broadcast over batch and seq dims)
+        result = combined * mag_scale.unsqueeze(0).unsqueeze(0)
+        
+        return result.to(input_dtype)
+    
+    def get_delta_weight(self) -> torch.Tensor:
+        """Compute the LoRA weight delta: (α/r) * B @ A"""
+        return (self.lora_B @ self.lora_A) * self.scaling
+    
+    def extra_repr(self) -> str:
+        return (
+            f"in_features={self.in_features}, out_features={self.out_features}, "
+            f"rank={self.rank}, alpha={self.alpha}, scaling={self.scaling:.4f}, dora=True"
+        )
+
+
 class LoRALayer(nn.Module):
     """
     Wrapper that combines a frozen base linear layer with LoRA adapter.
@@ -183,6 +311,70 @@ class LoRALayer(nn.Module):
     def weight(self) -> torch.Tensor:
         """Return effective weight (base + LoRA delta) for compatibility."""
         return self.lora.merge_weights(self.base_layer.weight)
+
+
+class DoRALayer(nn.Module):
+    """
+    DoRA wrapper that combines a frozen base linear layer with DoRA adapter.
+    
+    Uses weight-decomposed low-rank adaptation for improved performance.
+    """
+    
+    def __init__(
+        self,
+        base_layer: nn.Module,
+        rank: int = 8,
+        alpha: float = 16.0,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        
+        self.base_layer = base_layer
+        
+        # Handle both nn.Linear and Conv1D (GPT-2)
+        if hasattr(base_layer, 'nf'):  # Conv1D from transformers
+            in_features = base_layer.weight.shape[0]
+            out_features = base_layer.nf
+            self.is_conv1d = True
+            # For Conv1D, weight is transposed: [in, out] instead of [out, in]
+            self._base_weight = base_layer.weight.T
+        else:  # nn.Linear
+            in_features = base_layer.in_features
+            out_features = base_layer.out_features
+            self.is_conv1d = False
+            self._base_weight = base_layer.weight
+        
+        self.dora = DoRALinear(
+            in_features=in_features,
+            out_features=out_features,
+            rank=rank,
+            alpha=alpha,
+            dropout=dropout,
+        )
+        
+        # Initialize magnitude from base weights
+        with torch.no_grad():
+            self.dora.init_magnitude(self._base_weight.data.float())
+        
+        # Freeze base layer
+        for param in self.base_layer.parameters():
+            param.requires_grad = False
+    
+    @property
+    def lora(self):
+        """Compatibility property - returns the DoRA module."""
+        return self.dora
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass through frozen base + DoRA adapter."""
+        base_out = self.base_layer(x)
+        # DoRA needs the base weight for norm computation
+        return self.dora(x, base_out, self._base_weight)
+    
+    @property
+    def weight(self) -> torch.Tensor:
+        """Return effective weight for compatibility."""
+        return self._base_weight + self.dora.get_delta_weight()
 
 
 def _is_linear_layer(module: nn.Module) -> bool:
@@ -423,3 +615,145 @@ def apply_lora_with_layer_ranks(
         lora_layers[name] = lora_layer
     
     return model, lora_layers
+
+
+def apply_dora_to_model(
+    model: nn.Module,
+    target_modules: Tuple[str, ...] = ("q_proj", "v_proj"),
+    rank: int = 8,
+    alpha: float = 16.0,
+    dropout: float = 0.0,
+) -> Tuple[nn.Module, Dict[str, DoRALayer]]:
+    """
+    Apply DoRA (Weight-Decomposed LoRA) adapters to target modules.
+    
+    DoRA decomposes weights into magnitude and direction, applying LoRA
+    only to direction. This typically outperforms standard LoRA.
+    
+    Args:
+        model: The model to modify (will be modified in-place)
+        target_modules: Names of modules to apply DoRA to
+        rank: LoRA rank
+        alpha: Scaling factor
+        dropout: Dropout probability
+        
+    Returns:
+        Tuple of (modified model, dict of DoRA layers)
+    """
+    dora_layers = {}
+    targets = find_target_modules(model, target_modules)
+    
+    for name, module in targets.items():
+        # Create DoRA wrapper
+        dora_layer = DoRALayer(
+            base_layer=module,
+            rank=rank,
+            alpha=alpha,
+            dropout=dropout,
+        )
+        
+        # Replace module in parent
+        parent_name, child_name = name.rsplit(".", 1) if "." in name else ("", name)
+        parent = model.get_submodule(parent_name) if parent_name else model
+        setattr(parent, child_name, dora_layer)
+        
+        dora_layers[name] = dora_layer
+    
+    return model, dora_layers
+
+
+def get_lora_plus_param_groups(
+    model: nn.Module,
+    lr_A: float = 1e-4,
+    lr_B: float = 1e-3,
+    lr_magnitude: float = 1e-4,
+    weight_decay: float = 0.0,
+) -> List[Dict]:
+    """
+    Get optimizer parameter groups for LoRA+ (asymmetric learning rates).
+    
+    Based on: "LoRA+: Efficient Low Rank Adaptation" (2024)
+    
+    LoRA+ uses higher learning rate for matrix B (output) since it's 
+    initialized to zero and needs to learn more. This improves convergence.
+    
+    Recommended ratios from paper:
+    - lr_B / lr_A ≈ 10 (B learns faster than A)
+    - lr_magnitude ≈ lr_A (for DoRA)
+    
+    Args:
+        model: Model with LoRA/DoRA layers
+        lr_A: Learning rate for A matrix (input projection)
+        lr_B: Learning rate for B matrix (output projection)
+        lr_magnitude: Learning rate for DoRA magnitude (if applicable)
+        weight_decay: Weight decay coefficient
+        
+    Returns:
+        List of parameter groups for optimizer
+    """
+    params_A = []
+    params_B = []
+    params_magnitude = []
+    params_other = []
+    
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        
+        name_lower = name.lower()
+        
+        if "lora_a" in name_lower:
+            params_A.append(param)
+        elif "lora_b" in name_lower:
+            params_B.append(param)
+        elif "magnitude" in name_lower:
+            params_magnitude.append(param)
+        else:
+            params_other.append(param)
+    
+    groups = []
+    
+    if params_A:
+        groups.append({
+            "params": params_A,
+            "lr": lr_A,
+            "weight_decay": weight_decay,
+            "name": "lora_A",
+        })
+    
+    if params_B:
+        groups.append({
+            "params": params_B,
+            "lr": lr_B,  # Higher LR for B (LoRA+ key insight)
+            "weight_decay": weight_decay,
+            "name": "lora_B",
+        })
+    
+    if params_magnitude:
+        groups.append({
+            "params": params_magnitude,
+            "lr": lr_magnitude,
+            "weight_decay": 0.0,  # No weight decay for magnitude
+            "name": "dora_magnitude",
+        })
+    
+    if params_other:
+        groups.append({
+            "params": params_other,
+            "lr": lr_A,  # Default LR
+            "weight_decay": weight_decay,
+            "name": "other",
+        })
+    
+    return groups
+
+
+def count_dora_params(model: nn.Module) -> int:
+    """Count total DoRA parameters (LoRA + magnitude)."""
+    total = 0
+    for module in model.modules():
+        if isinstance(module, DoRALinear):
+            total += module.lora_A.numel() + module.lora_B.numel() + module.magnitude.numel()
+        elif isinstance(module, LoRALinear):
+            total += module.lora_A.numel() + module.lora_B.numel()
+    return total

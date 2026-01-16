@@ -58,6 +58,14 @@ class HyLoRADAConfig:
     lora_layerwise_rank: bool = False  # Enable layer-wise rank allocation
     lora_rank_strategy: str = "importance"  # "importance", "uniform", or "decreasing"
     
+    # DoRA: Weight-Decomposed LoRA (Liu et al., 2024)
+    # Decomposes weight into magnitude + direction, applies LoRA to direction only
+    use_dora: bool = False  # Enable DoRA instead of standard LoRA
+    
+    # LoRA+: Asymmetric learning rates (higher for B matrix)
+    lora_plus_enabled: bool = False  # Enable LoRA+ learning rate scheduling
+    lora_plus_ratio: float = 10.0  # lr_B / lr_A ratio (paper recommends 10)
+    
     # ============ DAA Settings (Noise Filtering) ============
     daa_enabled: bool = True
     daa_init_alpha: float = 1.0

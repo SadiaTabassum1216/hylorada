@@ -16,7 +16,11 @@ from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 
 from .config import HyLoRADAConfig
-from .lora import LoRALayer, apply_lora_to_model, apply_lora_with_layer_ranks, count_lora_params, merge_lora_weights
+from .lora import (
+    LoRALayer, DoRALayer,
+    apply_lora_to_model, apply_lora_with_layer_ranks, apply_dora_to_model,
+    count_lora_params, merge_lora_weights, get_lora_plus_param_groups,
+)
 from .daa import DirectAttentionAdapter, PositionalDAA, ContentAwareDAA, apply_daa_to_attention, count_daa_params
 from .sparse_mlp import SparseMLP, SparseAdapter, apply_sparse_to_ffn, count_sparse_params
 from .s2_attention import ShiftedSparseAttention, apply_s2_attention, get_s2_memory_estimate
@@ -109,8 +113,18 @@ class HyLoRADAModel(nn.Module):
     
     def _apply_hylorada(self):
         """Apply all HyLoRADA components to the model."""
-        # 1. Apply LoRA adapters (with optional layer-wise rank allocation)
-        if self.config.lora_layerwise_rank:
+        # 1. Apply LoRA/DoRA adapters
+        if self.config.use_dora:
+            # Use DoRA (Weight-Decomposed LoRA)
+            self.base_model, self.state.lora_layers = apply_dora_to_model(
+                model=self.base_model,
+                target_modules=self.config.lora_target_modules,
+                rank=self.config.lora_rank,
+                alpha=self.config.lora_alpha,
+                dropout=self.config.lora_dropout,
+            )
+        elif self.config.lora_layerwise_rank:
+            # Use layer-wise LoRA rank
             self.base_model, self.state.lora_layers = apply_lora_with_layer_ranks(
                 model=self.base_model,
                 target_modules=self.config.lora_target_modules,
@@ -120,6 +134,7 @@ class HyLoRADAModel(nn.Module):
                 rank_strategy=self.config.lora_rank_strategy,
             )
         else:
+            # Standard LoRA
             self.base_model, self.state.lora_layers = apply_lora_to_model(
                 model=self.base_model,
                 target_modules=self.config.lora_target_modules,

@@ -152,6 +152,44 @@ def main():
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]
                 train_time = train_model(model, tokenizer, train_texts, args, "LoRA")
+            
+            elif method == "dora":
+                # DoRA: Weight-Decomposed LoRA
+                config = HyLoRADAConfig(
+                    lora_rank=args.lora_rank,
+                    lora_alpha=args.lora_rank * 2,
+                    use_dora=True,
+                    daa_enabled=False,
+                    sparse_enabled=False,
+                    budget_lora=1.0,
+                    budget_daa=0.0,
+                    budget_sparse=0.0,
+                )
+                model = HyLoRADAModel(base_model, config)
+                model.print_trainable_params()
+                params = model.count_params()["trainable_params"]
+                train_time = train_model(model, tokenizer, train_texts, args, "DoRA")
+            
+            elif method == "dora-plus":
+                # DoRA + LoRA+ (asymmetric LR) + trainable norms
+                config = HyLoRADAConfig(
+                    lora_rank=args.lora_rank,
+                    lora_alpha=args.lora_rank * 2,
+                    use_dora=True,
+                    lora_plus_enabled=True,
+                    lora_plus_ratio=10.0,
+                    daa_enabled=True,
+                    daa_use_positional=True,
+                    trainable_norms=True,
+                    sparse_enabled=False,
+                    budget_lora=0.9,
+                    budget_daa=0.1,
+                    budget_sparse=0.0,
+                )
+                model = HyLoRADAModel(base_model, config)
+                model.print_trainable_params()
+                params = model.count_params()["trainable_params"]
+                train_time = train_model(model, tokenizer, train_texts, args, "DoRA+")
                 
             elif method == "lorada":
                 model = LoRaDAModel(base_model, baseline_config)
