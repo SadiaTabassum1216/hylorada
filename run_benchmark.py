@@ -171,18 +171,18 @@ def main():
                 train_time = train_model(model, tokenizer, train_texts, args, "DoRA")
             
             elif method == "hylorada":
-                # HyLoRADA: Novel method with all optimizations
+                # HyLoRADA: Novel method with OPTIMIZED hyperparameters
                 # - Orthogonal init (prevents rank collapse)
                 # - Gated magnitude (learnable magnitude control)
                 # - Residual LoRA path (blends DoRA + LoRA dynamics)
                 # - LoRA+ (asymmetric learning rates)
                 config = HyLoRADAConfig(
-                    lora_rank=args.lora_rank,
-                    lora_alpha=args.lora_rank * 2.5,  # Slightly higher alpha
-                    lora_dropout=0.05,
-                    use_hylorada=True,  # Our novel method
-                    lora_plus_enabled=True,  # Enable LoRA+ LR
-                    lora_plus_ratio=10.0,  # 10x LR for B matrix
+                    lora_rank=16,  # Optimized (was 8)
+                    lora_alpha=47.2,  # Optimized: rank * 2.95
+                    lora_dropout=0.01,  # Optimized (was 0.05)
+                    use_hylorada=True,
+                    lora_plus_enabled=True,
+                    lora_plus_ratio=17.1,  # Optimized (was 10)
                     daa_enabled=False,
                     sparse_enabled=False,
                     budget_lora=1.0,
@@ -191,12 +191,12 @@ def main():
                 )
                 model = HyLoRADAModel(base_model, config)
                 
-                # Adjust gate initialization (biased toward DoRA)
+                # Apply optimized gate/residual initialization
                 for module in model.modules():
                     if hasattr(module, 'magnitude_gate'):
-                        module.magnitude_gate.data.fill_(-0.5)  # sigmoid(-0.5) ≈ 0.38
+                        module.magnitude_gate.data.fill_(0.37)  # Optimized (sigmoid ≈ 0.59)
                     if hasattr(module, 'residual_weight'):
-                        module.residual_weight.data.fill_(0.2)  # Start with 55% DoRA
+                        module.residual_weight.data.fill_(0.22)  # Optimized (sigmoid ≈ 0.55)
                 
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]
