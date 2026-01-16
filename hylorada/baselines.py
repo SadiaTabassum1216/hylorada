@@ -12,7 +12,7 @@ Each method uses similar parameter budgets for fair comparison.
 
 import torch
 import torch.nn as nn
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, List
 from dataclasses import dataclass
 
 from hylorada.config import HyLoRADAConfig
@@ -29,6 +29,7 @@ class BaselineConfig:
     lora_dropout: float = 0.05
     sparse_adapter_dim: int = 128
     sparse_topk_ratio: float = 0.05
+    sparse_target_layers: Optional[list] = None  # None = all layers
     daa_per_head: bool = True
     max_sequence_length: int = 32768
 
@@ -343,6 +344,7 @@ class SparseAdapterModel(nn.Module):
             ffn_module_pattern=self.ffn_pattern,
             topk_ratio=self.config.sparse_topk_ratio,
             adapter_dim=self.config.sparse_adapter_dim,
+            target_layers=self.config.sparse_target_layers,
         )
         
         self._freeze_base_model()

@@ -87,7 +87,15 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./benchmark_results")
     parser.add_argument("--methods", nargs="+", 
                         default=["baseline", "lora", "lorada", "longlora", "sparse", "hylorada"])
+    parser.add_argument("--sparse_dim", type=int, default=128,
+                        help="Sparse adapter bottleneck dimension (default: 128, lite: 32)")
+    parser.add_argument("--sparse_layers", type=str, default=None,
+                        help="Comma-separated layer indices for sparse (e.g., '0,5,10,15,20,23')")
     args = parser.parse_args()
+    
+    # Parse sparse_layers if provided
+    if args.sparse_layers:
+        args.sparse_layers = [int(x.strip()) for x in args.sparse_layers.split(",")]
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
@@ -118,8 +126,9 @@ def main():
     baseline_config = BaselineConfig(
         lora_rank=args.lora_rank,
         lora_alpha=args.lora_rank * 2,
-        sparse_adapter_dim=128,
+        sparse_adapter_dim=args.sparse_dim,
         sparse_topk_ratio=0.05,
+        sparse_target_layers=args.sparse_layers,
     )
     
     results = {}
@@ -169,13 +178,24 @@ def main():
                     daa_enabled=True,
                     daa_use_positional=True,
                     sparse_enabled=True,
-                    sparse_adapter_dim=128,
+                    sparse_adapter_dim=args.sparse_dim,
                     sparse_topk_ratio=0.05,
+                    sparse_target_layers=args.sparse_layers,
                 )
                 model = HyLoRADAModel(base_model, config)
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]
                 train_time = train_model(model, tokenizer, train_texts, args, "HyLoRADA")
+            
+            elif method == "hylorada-lite":
+                from hylorada.config import HyLoRADAPresets
+                config = HyLoRADAPresets.lightweight()
+                config.lora_rank = args.lora_rank
+                config.lora_alpha = args.lora_rank * 2
+                model = HyLoRADAModel(base_model, config)
+                model.print_trainable_params()
+                params = model.count_params()["trainable_params"]
+                train_time = train_model(model, tokenizer, train_texts, args, "HyLoRADA-Lite")
             
             else:
                 print(f"  Unknown method: {method}")
