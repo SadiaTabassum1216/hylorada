@@ -1,11 +1,10 @@
 """
 HyLoRADA Model Wrapper
 
-Main integration module that combines all HyLoRADA components:
-- LoRA adapters for global context
-- Direct Attention Adaptation for noise filtering
-- Sparse MLP for local precision
-- Shifted Sparse Attention for efficiency
+Main integration module for HyLoRADA (Hybrid Low-Rank Direct Attention Adaptation):
+- Orthogonal initialization for LoRA A matrix (prevents rank collapse)
+- Gated magnitude control (learnable DoRA magnitude blending)
+- Residual LoRA path (combines DoRA and LoRA dynamics)
 
 Provides a unified interface for applying HyLoRADA to any transformer model.
 """

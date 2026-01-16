@@ -1,11 +1,10 @@
 """
 HyLoRADA Configuration Module
 
-Defines hyperparameters for the hybrid fine-tuning framework:
-- LoRA: Global context adaptation
-- DAA: Direct Attention Adaptation for noise filtering
-- Sparse MLP: Local precision tuning
-- S²-Attn: Shifted Sparse Attention for efficiency
+Defines hyperparameters for HyLoRADA (Hybrid Low-Rank Direct Attention Adaptation):
+- Orthogonal initialization for LoRA A matrix (prevents rank collapse)
+- Gated magnitude control (learnable DoRA magnitude blending)
+- Residual LoRA path (combines DoRA and LoRA dynamics)
 """
 
 from dataclasses import dataclass, field
@@ -17,10 +16,10 @@ class HyLoRADAConfig:
     """
     Configuration for HyLoRADA hybrid fine-tuning.
     
-    The framework allocates a fixed parameter budget across three components:
-    1. LoRA adapters for global context understanding
-    2. Direct Attention Adaptation for noise suppression
-    3. Sparse MLP adapters for local factual precision
+    HyLoRADA is a novel PEFT method with three key innovations:
+    1. Orthogonal initialization - Prevents rank collapse during training
+    2. Gated magnitude - Learnable control over weight magnitude contribution
+    3. Residual LoRA path - Blends DoRA and LoRA learning dynamics
     
     Args:
         lora_rank: Rank for LoRA decomposition (higher = more capacity)
@@ -28,23 +27,13 @@ class HyLoRADAConfig:
         lora_dropout: Dropout probability for LoRA layers
         lora_target_modules: Which attention projections to apply LoRA
         
+        use_hylorada: Enable HyLoRADA (orthogonal + gated + residual)
+        use_dora: Enable DoRA (weight-decomposed LoRA)
+        lora_plus_enabled: Enable LoRA+ asymmetric learning rates
+        lora_plus_ratio: LR ratio for B matrix (10-20x recommended)
+        
         daa_enabled: Whether to use Direct Attention Adaptation
-        daa_init_alpha: Initial scaling factor for attention weights
-        daa_init_beta: Initial bias for attention weights
-        daa_per_head: Whether to learn separate α, β per attention head
-        
-        sparse_enabled: Whether to use Sparse MLP adapters
-        sparse_topk_ratio: Fraction of neurons to activate (0.1 = top 10%)
-        sparse_adapter_dim: Bottleneck dimension for sparse adapter
-        sparse_target_layers: Which layers to apply sparse adapters (None = all)
-        
-        s2_attn_enabled: Whether to use Shifted Sparse Attention
-        s2_group_size: Size of attention groups (smaller = more memory efficient)
-        s2_shift_ratio: Fraction of group to shift (0.5 = half)
-        
-        budget_lora: Fraction of param budget for LoRA (0.0-1.0)
-        budget_daa: Fraction of param budget for DAA (0.0-1.0)
-        budget_sparse: Fraction of param budget for Sparse MLP (0.0-1.0)
+        sparse_enabled: Whether to use Sparse MLP adapters (disabled by default)
     """
     
     # ============ LoRA Settings (Global Adaptation) ============
@@ -193,97 +182,4 @@ class HyLoRADAPresets:
     def balanced() -> HyLoRADAConfig:
         """Balanced config for typical fine-tuning."""
         return HyLoRADAConfig()  # Uses defaults
-    
-    @staticmethod
-    def high_accuracy() -> HyLoRADAConfig:
-        """Higher capacity config for maximum accuracy.
-        
-        Uses Large-Sparse strategy (bigger adapter, higher sparsity) and
-        higher LoRA rank for better task adaptation.
-        """
-        return HyLoRADAConfig(
-            lora_rank=16,
-            lora_alpha=32.0,
-            sparse_enabled=True,
-            sparse_topk_ratio=0.05,  # Large-Sparse: higher sparsity
-            sparse_adapter_dim=256,  # Large-Sparse: bigger adapter
-            daa_use_positional=True,
-            budget_lora=0.5,
-            budget_daa=0.15,
-            budget_sparse=0.35,
-        )
-    
-    @staticmethod
-    def pro() -> HyLoRADAConfig:
-        """Pro config for maximum accuracy with minimal parameter overhead.
-        
-        Enables all three accuracy improvements:
-        - Layer-wise LoRA rank (high at edges, low in middle)
-        - Content-aware DAA (input-dependent α, β)
-        - Trainable LayerNorms (LongLoRA finding)
-        
-        Disables Sparse MLP as it doesn't help at small scales.
-        
-        Expected: ~1.2M params, ~24.5 PPL (matching LoRaDA with improvements)
-        """
-        return HyLoRADAConfig(
-            # LoRA with layer-wise rank
-            lora_rank=8,
-            lora_alpha=16.0,
-            lora_layerwise_rank=True,
-            lora_rank_strategy="importance",
-            
-            # Content-aware DAA
-            daa_enabled=True,
-            daa_content_aware=True,
-            daa_use_positional=False,  # Content-aware takes priority
-            
-            # Disable sparse (doesn't help at low param budget)
-            sparse_enabled=False,
-            
-            # Trainable norms
-            trainable_norms=True,
-            
-            # Adjusted budget since sparse is disabled
-            budget_lora=0.85,
-            budget_daa=0.15,
-            budget_sparse=0.0,
-        )
-    
-    @staticmethod
-    def lightweight() -> HyLoRADAConfig:
-        """Lightweight config for maximum parameter efficiency.
-        
-        Achieves ~90% parameter reduction vs default by:
-        - Reducing sparse_adapter_dim from 128 to 32
-        - Targeting only 6 key layers instead of all layers
-        - Using higher sparsity ratio (10% vs 5%)
-        
-        Expected: ~1.5M params with <0.3 PPL impact.
-        """
-        return HyLoRADAConfig(
-            lora_rank=8,
-            lora_alpha=16.0,
-            daa_enabled=True,
-            daa_use_positional=True,
-            sparse_enabled=True,
-            sparse_adapter_dim=32,  # Down from 128
-            sparse_topk_ratio=0.1,  # Higher activation ratio
-            sparse_target_layers=[0, 5, 10, 15, 20, 23],  # Only 6 layers
-        )
-    
-    @staticmethod
-    def long_context_128k() -> HyLoRADAConfig:
-        """Optimized for 128k+ context lengths.
-        
-        Enables PositionalDAA to address the Lost-in-the-Middle phenomenon
-        where models struggle with information in the middle of long contexts.
-        """
-        return HyLoRADAConfig(
-            daa_use_positional=True,  # Critical for long context
-            daa_num_buckets=128,  # More buckets for longer sequences
-            s2_group_size=4096,
-            max_sequence_length=131072,
-            gradient_checkpointing=True,
-            mixed_precision="bf16",
-        )
+

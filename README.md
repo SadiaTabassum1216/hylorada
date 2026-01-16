@@ -1,13 +1,23 @@
 # HyLoRADA
 
-**Hybrid Low-Rank Adaptation with Direct Attention** - A parameter-efficient fine-tuning framework for long-context LLMs.
+**Hybrid Low-Rank Direct Attention Adaptation** - A novel parameter-efficient fine-tuning method for LLMs.
 
-## Features
+## Novel Contributions
 
-- **LoRA** - Global context adaptation via low-rank decomposition (Q, K, V, O projections)
-- **PositionalDAA** - Position-aware Direct Attention Adaptation for noise filtering (addresses Lost-in-the-Middle)
-- **Sparse MLP** - Large-Sparse strategy with Top-k neuron selection for local precision
-- **S²-Attn** - Shifted Sparse Attention for memory efficiency (optional)
+HyLoRADA improves upon DoRA with three key innovations:
+
+1. **Orthogonal Initialization** - Prevents rank collapse during training
+2. **Gated Magnitude** - Learnable control over weight magnitude contribution
+3. **Residual LoRA Path** - Blends DoRA and LoRA learning dynamics
+
+## Benchmark Results
+
+| Method | Params | PPL | LiM PPL |
+|--------|--------|-----|---------|
+| LoRA | 540K | 32.11 | 25.58 |
+| LoRaDA | 1.0M | 30.06 | 24.24 |
+| DoRA | 1.1M | 29.91 | 24.24 |
+| **HyLoRADA** | 1.1M | **29.24** | **23.37** |
 
 ## Setup
 
@@ -32,80 +42,65 @@ from transformers import AutoModelForCausalLM
 from hylorada import HyLoRADAConfig, HyLoRADAModel
 
 # Load base model
-model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2-0.5B")
+model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B")
 
-# Apply HyLoRADA (all features enabled by default)
-config = HyLoRADAConfig(lora_rank=8)
+# Apply HyLoRADA
+config = HyLoRADAConfig(
+    lora_rank=16,
+    lora_alpha=47.2,
+    use_hylorada=True,
+    lora_plus_enabled=True,
+    lora_plus_ratio=17.1,
+)
 hylorada_model = HyLoRADAModel(model, config)
 hylorada_model.print_trainable_params()
 ```
 
-## Training
+## Benchmark All Methods
 
-### Basic Training
 ```bash
-python example_train.py --model_name Qwen/Qwen2-0.5B --num_epochs 1
+python run_benchmark.py --methods lora dora lorada hylorada --epochs 3
 ```
 
-### Full Options
+## Hyperparameter Optimization
+
 ```bash
-python example_train.py \
-    --model_name Qwen/Qwen2-0.5B \
-    --max_length 2048 \
-    --num_epochs 3 \
-    --learning_rate 2e-4 \
-    --batch_size 1 \
-    --gradient_accumulation 16 \
-    --output_dir ./output
+pip install optuna
+python optimize_hylorada.py --n_trials 15 --epochs 2
 ```
-
-## Evaluation & Experiments
-
-### Run Full Experiment (Baseline vs HyLoRADA)
-```bash
-python run_experiment.py \
-    --model_name Qwen/Qwen2-0.5B \
-    --max_length 1024 \
-    --num_epochs 10 \
-    --num_test_samples 50
-```
-
-### Compare Multiple PEFT Methods
-```bash
-# Compare all methods: Baseline, LoRA, LoRaDA, LongLoRA, SparseAdapter, HyLoRADA
-python run_comparison.py \
-    --model_name Qwen/Qwen2-0.5B \
-    --max_length 1024 \
-    --num_epochs 3
-
-# Compare specific methods only
-python run_comparison.py \
-    --methods baseline lora lorada hylorada \
-    --num_epochs 3
-```
-
-Results are saved to `./experiments/comparison_TIMESTAMP/comparison_results.json`
 
 ## Baseline Methods
 
-HyLoRADA includes implementations of other PEFT methods for fair comparison:
-
-| Method | Description | Components |
-|--------|-------------|------------|
-| **LoRA** | Standard low-rank adaptation | Q, V projections only |
-| **LoRaDA** | LoRA + Direct Attention Adaptation | LoRA + DAA |
-| **LongLoRA** | LoRA + trainable embeddings/norms | LoRA + embed + LayerNorm |
-| **SparseAdapter** | Sparse FFN adapters only | Sparse MLP |
-| **HyLoRADA** | Full hybrid approach | LoRA + PositionalDAA + Sparse MLP |
+| Method | Description |
+|--------|-------------|
+| **LoRA** | Standard low-rank adaptation |
+| **DoRA** | Weight-decomposed LoRA |
+| **LoRaDA** | LoRA + Direct Attention Adaptation |
+| **HyLoRADA** | Our method (orthogonal + gated + residual) |
 
 ```python
-from hylorada import StandardLoRA, LoRaDAModel, LongLoRAModel, SparseAdapterModel
+from hylorada import StandardLoRA, LoRaDAModel
 
-# Use any baseline
+# Use baselines for comparison
 model = StandardLoRA(base_model)
 model = LoRaDAModel(base_model)
-model = LongLoRAModel(base_model)
-model = SparseAdapterModel(base_model)
+```
+
+## Project Structure
+
+```
+hylorada/
+├── hylorada/
+│   ├── config.py       # Configuration
+│   ├── lora.py         # LoRA / DoRA / HyLoRADA
+│   ├── model.py        # HyLoRADAModel wrapper
+│   ├── baselines.py    # Baseline methods
+│   ├── trainer.py      # Training utilities
+│   └── evaluation.py   # Metrics
+├── run_benchmark.py    # Benchmark script
+├── optimize_hylorada.py # Bayesian HPO
+├── METHODOLOGY.md      # Technical documentation
+└── tests/              # Unit tests
 ```
 
 ## Testing
@@ -114,40 +109,13 @@ model = SparseAdapterModel(base_model)
 python -m pytest tests/ -v
 ```
 
-## Project Structure
+## Citation
 
-```
-hylorada/
-├── hylorada/
-│   ├── config.py       # HyLoRADA configuration
-│   ├── lora.py         # LoRA adapters
-│   ├── daa.py          # Direct Attention Adaptation (DAA + PositionalDAA)
-│   ├── sparse_mlp.py   # Sparse MLP with Top-k gating
-│   ├── s2_attention.py # Shifted Sparse Attention
-│   ├── model.py        # Main HyLoRADAModel wrapper
-│   ├── baselines.py    # Baseline methods (LoRA, LoRaDA, LongLoRA, SparseAdapter)
-│   ├── trainer.py      # Training utilities
-│   └── evaluation.py   # Evaluation metrics
-├── example_train.py    # Training script
-├── run_experiment.py   # Single experiment runner
-├── run_comparison.py   # Multi-method comparison
-└── tests/              # Unit tests
-```
-
-## Configuration Presets
-
-```python
-from hylorada.config import HyLoRADAPresets
-
-# Memory-efficient config
-config = HyLoRADAPresets.efficient()
-
-# Balanced default config
-config = HyLoRADAPresets.balanced()
-
-# Maximum accuracy config
-config = HyLoRADAPresets.high_accuracy()
-
-# Long context (128k+) config
-config = HyLoRADAPresets.long_context_128k()
+```bibtex
+@misc{hylorada2026,
+  title={HyLoRADA: Hybrid Low-Rank Direct Attention Adaptation},
+  author={Sadia Tabassum},
+  year={2026},
+  url={https://github.com/SadiaTabassum1216/hylorada}
+}
 ```

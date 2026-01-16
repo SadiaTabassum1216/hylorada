@@ -2,7 +2,7 @@
 # Efficient Long-Context Fine-Tuning Framework
 
 from hylorada.config import HyLoRADAConfig
-from hylorada.lora import LoRALinear, apply_lora_to_model
+from hylorada.lora import LoRALinear, HyLoRADALinear, apply_lora_to_model
 from hylorada.daa import DirectAttentionAdapter
 from hylorada.sparse_mlp import SparseMLP, SparseAdapter
 from hylorada.s2_attention import ShiftedSparseAttention

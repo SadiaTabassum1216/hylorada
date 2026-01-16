@@ -1,8 +1,10 @@
 """
-LoRA (Low-Rank Adaptation) Module
+LoRA Module (Low-Rank Adaptation)
 
-Implements global context adaptation through low-rank matrix decomposition.
-Based on: Hu et al., 2021 - "LoRA: Low-Rank Adaptation of Large Language Models"
+Implements three PEFT methods:
+1. LoRA - Low-rank adaptation (Hu et al., 2021)
+2. DoRA - Weight-decomposed LoRA (Liu et al., 2024)
+3. HyLoRADA - Our novel method with orthogonal init + gated magnitude + residual LoRA
 
 Key features:
 - Low-rank A/B decomposition for weight updates

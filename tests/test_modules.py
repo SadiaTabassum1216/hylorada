@@ -1,11 +1,9 @@
 """
 HyLoRADA Unit Tests
 
-Tests for all core modules:
-- LoRA adapters
+Tests for core modules:
+- LoRA / DoRA / HyLoRADA adapters
 - Direct Attention Adaptation
-- Sparse MLP
-- Shifted Sparse Attention
 - Model integration
 """
 
@@ -75,8 +73,8 @@ class TestConfig:
         efficient = HyLoRADAPresets.efficient()
         assert efficient.lora_rank == 4
         
-        high_accuracy = HyLoRADAPresets.high_accuracy()
-        assert high_accuracy.lora_rank == 16
+        balanced = HyLoRADAPresets.balanced()
+        assert balanced.lora_rank == 8  # Default
     
     def test_serialization(self):
         """Test config to/from dict."""
