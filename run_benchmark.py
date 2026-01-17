@@ -126,24 +126,34 @@ def main():
     # Load data
     print("[2] Loading data...")
     if args.dataset == "code":
-        # The Stack Smol - Python code (Software Engineering task)
-        dataset = load_dataset("bigcode/the-stack-smol", "data/python", split="train")
+        # GitHub Code Clean - Python (non-gated, public dataset)
+        dataset = load_dataset(
+            "codeparrot/github-code-clean",
+            languages=["Python"],
+            split="train",
+            streaming=True  # Stream to avoid large downloads
+        )
         
         def format_code_sample(sample):
-            code = sample.get("content", "")
+            code = sample.get("code", "")
             if code and len(code) > 100:
-                # Use first 500 chars as code, format for LM task
                 return f"# Python Code:\n{code[:800]}"
             return None
         
-        all_texts = [format_code_sample(s) for s in dataset]
-        all_texts = [t for t in all_texts if t][:args.num_train + args.num_test]
+        # Collect samples from streaming dataset
+        all_texts = []
+        for sample in dataset:
+            text = format_code_sample(sample)
+            if text:
+                all_texts.append(text)
+            if len(all_texts) >= args.num_train + args.num_test:
+                break
         
         split_idx = int(len(all_texts) * 0.8)
         train_texts = all_texts[:split_idx][:args.num_train]
         test_texts = all_texts[split_idx:][:args.num_test]
         
-        print(f"    Dataset: The Stack Smol (Python) - Code Modeling")
+        print(f"    Dataset: GitHub Code Clean (Python) - Code Modeling")
     else:
         # WikiText (default)
         dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
