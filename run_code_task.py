@@ -29,48 +29,70 @@ def load_code_dataset(tokenizer, max_length=1024, num_train=1000, num_test=100):
     
     # Try different code datasets in order of preference
     datasets_to_try = [
-        ("bigcode/starcoderdata", "python", "content"),
-        ("codeparrot/github-code", "Python", "code"),
-        ("nuprl/MultiPL-E", "humaneval-py", "prompt"),
+        # OpenAI HumanEval - always available
+        ("openai/openai_humaneval", None, "prompt", "canonical_solution"),
+        # CodeParrot APPS - competitive programming
+        ("codeparrot/apps", "introductory", "question", "solutions"),
+        # MBPP - basic Python problems
+        ("google-research-datasets/mbpp", "sanitized", "text", "code"),
     ]
     
     dataset = None
-    for ds_name, config_or_filter, text_col in datasets_to_try:
+    for ds_info in datasets_to_try:
+        ds_name, config, text_col, code_col = ds_info
         try:
             print(f"  Trying {ds_name}...")
-            if ds_name == "bigcode/starcoderdata":
-                # StarCoderData - streaming dataset
-                ds = load_dataset(ds_name, data_dir="python", split="train", streaming=True)
-                # Take samples from streaming
-                samples = []
-                for i, sample in enumerate(ds):
-                    if i >= num_train + num_test:
-                        break
-                    samples.append(sample[text_col])
-                dataset = {"train": samples[:num_train], "test": samples[num_train:]}
-                print(f"  ✓ Loaded {ds_name}")
-                break
-            elif ds_name == "nuprl/MultiPL-E":
-                ds = load_dataset(ds_name, config_or_filter, trust_remote_code=True)
-                texts = [s[text_col] for s in ds["test"]]
-                # Split for train/test
-                dataset = {"train": texts[:num_train], "test": texts[num_train:num_train+num_test]}
-                print(f"  ✓ Loaded {ds_name}")
+            if config:
+                ds = load_dataset(ds_name, config)
+            else:
+                ds = load_dataset(ds_name)
+            
+            # Get the split (usually 'test' for eval datasets)
+            split_name = "train" if "train" in ds else "test"
+            data = ds[split_name]
+            
+            # Combine prompt + solution for training
+            texts = []
+            for item in data:
+                text = item.get(text_col, "")
+                code = item.get(code_col, "")
+                # Handle list of solutions
+                if isinstance(code, list) and len(code) > 0:
+                    code = code[0]
+                if isinstance(code, str):
+                    combined = f"# Problem:\n{text}\n\n# Solution:\n{code}"
+                    texts.append(combined)
+            
+            if len(texts) >= 10:  # Need at least some samples
+                # Split into train/test
+                train_texts = texts[:min(num_train, len(texts)-num_test)]
+                test_texts = texts[len(train_texts):len(train_texts)+num_test]
+                dataset = {"train": train_texts, "test": test_texts}
+                print(f"  ✓ Loaded {ds_name}: {len(train_texts)} train, {len(test_texts)} test")
                 break
         except Exception as e:
             print(f"    Failed: {e}")
             continue
     
-    # Fallback to a simple Python code generation approach
+    # Fallback to diverse Python code samples
     if dataset is None:
-        print("  Using simple code samples fallback...")
+        print("  Using diverse code samples fallback...")
         code_samples = [
-            "def fibonacci(n):\n    if n <= 1:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)",
-            "def factorial(n):\n    if n == 0:\n        return 1\n    return n * factorial(n-1)",
-            "class Stack:\n    def __init__(self):\n        self.items = []\n    def push(self, item):\n        self.items.append(item)",
-            "def binary_search(arr, target):\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid",
-        ] * (num_train // 4 + 1)
-        dataset = {"train": code_samples[:num_train], "test": code_samples[:num_test]}
+            "def fibonacci(n):\n    '''Calculate nth Fibonacci number'''\n    if n <= 1:\n        return n\n    a, b = 0, 1\n    for _ in range(2, n + 1):\n        a, b = b, a + b\n    return b",
+            "def factorial(n):\n    '''Calculate factorial recursively'''\n    if n == 0:\n        return 1\n    return n * factorial(n - 1)",
+            "def quicksort(arr):\n    '''QuickSort implementation'''\n    if len(arr) <= 1:\n        return arr\n    pivot = arr[len(arr) // 2]\n    left = [x for x in arr if x < pivot]\n    middle = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n    return quicksort(left) + middle + quicksort(right)",
+            "def merge_sort(arr):\n    '''MergeSort implementation'''\n    if len(arr) <= 1:\n        return arr\n    mid = len(arr) // 2\n    left = merge_sort(arr[:mid])\n    right = merge_sort(arr[mid:])\n    return merge(left, right)",
+            "def binary_search(arr, target):\n    '''Binary search in sorted array'''\n    left, right = 0, len(arr) - 1\n    while left <= right:\n        mid = (left + right) // 2\n        if arr[mid] == target:\n            return mid\n        elif arr[mid] < target:\n            left = mid + 1\n        else:\n            right = mid - 1\n    return -1",
+            "class LinkedList:\n    '''Simple linked list'''\n    def __init__(self):\n        self.head = None\n    def append(self, val):\n        if not self.head:\n            self.head = Node(val)\n        else:\n            curr = self.head\n            while curr.next:\n                curr = curr.next\n            curr.next = Node(val)",
+            "def is_palindrome(s):\n    '''Check if string is palindrome'''\n    s = ''.join(c.lower() for c in s if c.isalnum())\n    return s == s[::-1]",
+            "def two_sum(nums, target):\n    '''Find two numbers that add to target'''\n    seen = {}\n    for i, num in enumerate(nums):\n        complement = target - num\n        if complement in seen:\n            return [seen[complement], i]\n        seen[num] = i\n    return []",
+            "def max_subarray(nums):\n    '''Kadane's algorithm for max subarray sum'''\n    max_sum = curr_sum = nums[0]\n    for num in nums[1:]:\n        curr_sum = max(num, curr_sum + num)\n        max_sum = max(max_sum, curr_sum)\n    return max_sum",
+            "class BinaryTree:\n    '''Binary tree with traversal'''\n    def __init__(self, val):\n        self.val = val\n        self.left = None\n        self.right = None\n    def inorder(self):\n        result = []\n        if self.left:\n            result += self.left.inorder()\n        result.append(self.val)\n        if self.right:\n            result += self.right.inorder()\n        return result",
+        ]
+        # Create more variety by combining samples
+        extended = code_samples * (num_train // len(code_samples) + 1)
+        dataset = {"train": extended[:num_train], "test": code_samples[:num_test]}
+
     
     # Custom dataset that returns dicts
     class CodeDataset(torch.utils.data.Dataset):
