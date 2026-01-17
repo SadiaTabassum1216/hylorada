@@ -126,34 +126,34 @@ def main():
     # Load data
     print("[2] Loading data...")
     if args.dataset == "code":
-        # GitHub Code Clean - Python (non-gated, public dataset)
-        dataset = load_dataset(
-            "codeparrot/github-code-clean",
-            languages=["Python"],
-            split="train",
-            streaming=True  # Stream to avoid large downloads
-        )
-        
-        def format_code_sample(sample):
-            code = sample.get("code", "")
-            if code and len(code) > 100:
-                return f"# Python Code:\n{code[:800]}"
-            return None
-        
-        # Collect samples from streaming dataset
-        all_texts = []
-        for sample in dataset:
-            text = format_code_sample(sample)
-            if text:
-                all_texts.append(text)
-            if len(all_texts) >= args.num_train + args.num_test:
-                break
-        
-        split_idx = int(len(all_texts) * 0.8)
-        train_texts = all_texts[:split_idx][:args.num_train]
-        test_texts = all_texts[split_idx:][:args.num_test]
-        
-        print(f"    Dataset: GitHub Code Clean (Python) - Code Modeling")
+        # MultiPL-E - Python code benchmark (Parquet format, no scripts)
+        try:
+            dataset = load_dataset("nuprl/MultiPL-E", "humaneval-py", split="test")
+            
+            def format_code_sample(sample):
+                prompt = sample.get("prompt", "")
+                if prompt and len(prompt) > 50:
+                    return f"# Python Code:\n{prompt}"
+                return None
+            
+            all_texts = [format_code_sample(s) for s in dataset]
+            all_texts = [t for t in all_texts if t]
+            
+            # Duplicate if not enough samples
+            while len(all_texts) < args.num_train + args.num_test:
+                all_texts = all_texts + all_texts
+            
+            split_idx = int(len(all_texts) * 0.8)
+            train_texts = all_texts[:split_idx][:args.num_train]
+            test_texts = all_texts[split_idx:][:args.num_test]
+            
+            print(f"    Dataset: MultiPL-E (Python) - Code Completion")
+        except Exception as e:
+            print(f"    Warning: Code dataset failed ({e}), falling back to WikiText")
+            dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
+            train_texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 50][:args.num_train]
+            test_texts = [t for t in dataset["test"]["text"] if len(t.strip()) > 50][:args.num_test]
+            print(f"    Dataset: WikiText-2 (fallback)")
     else:
         # WikiText (default)
         dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
