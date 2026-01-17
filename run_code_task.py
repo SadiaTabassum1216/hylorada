@@ -189,8 +189,8 @@ def train_hylorada_v2_code(args):
     
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="Evaluating"):
-            input_ids = batch[0].to(device)
-            attention_mask = batch[1].to(device)
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
             
             outputs = model(
                 input_ids=input_ids,
@@ -199,6 +199,7 @@ def train_hylorada_v2_code(args):
             )
             total_loss += outputs.loss.item()
             num_batches += 1
+
     
     avg_loss = total_loss / num_batches
     perplexity = torch.exp(torch.tensor(avg_loss)).item()
