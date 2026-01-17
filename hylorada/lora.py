@@ -383,6 +383,158 @@ class HyLoRADALinear(nn.Module):
         )
 
 
+class HyLoRADAv2Linear(nn.Module):
+    """
+    HyLoRADA v2: Structure-Aware Hybrid Low-Rank Adaptation.
+    
+    Extends HyLoRADA v1 with structure-conditioned LoRA scaling.
+    The adaptation strength becomes position-dependent based on structural signals.
+    
+    Novel contributions over v1:
+    1. Structure-conditioned scaling (position-dependent LoRA strength)
+    2. Backward compatible (works without structure prior, falls back to v1)
+    
+    The formulation is:
+        delta = scaling * B @ A @ x
+        if structure_prior provided:
+            delta = delta * (0.5 + sigmoid(scale_from_structure(structure_prior)))
+        output = (1-β) * DoRA_output + β * LoRA_output
+    
+    Args:
+        in_features: Input dimension
+        out_features: Output dimension
+        rank: Rank of the low-rank decomposition
+        alpha: Scaling factor
+        dropout: Dropout probability
+        structure_dim: Dimension of structure prior input
+    """
+    
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        rank: int = 8,
+        alpha: float = 16.0,
+        dropout: float = 0.0,
+        structure_dim: int = 32,
+    ):
+        super().__init__()
+        
+        self.in_features = in_features
+        self.out_features = out_features
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+        self.structure_dim = structure_dim
+        
+        # === From HyLoRADA v1 (proven components) ===
+        # LoRA matrices with orthogonal initialization for A
+        self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        
+        # Learnable magnitude vector (from DoRA)
+        self.magnitude = nn.Parameter(torch.ones(out_features))
+        
+        # Gated magnitude control - starts at 0.5
+        self.magnitude_gate = nn.Parameter(torch.tensor(0.0))
+        
+        # Residual LoRA weight - learnable blend between DoRA and LoRA
+        self.residual_weight = nn.Parameter(torch.tensor(0.1))
+        
+        # Dropout
+        self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
+        
+        # Cache for base weight
+        self.register_buffer("base_weight_norm", None)
+        
+        # === NEW in v2: Structure conditioning ===
+        # Maps structure prior to position-dependent scale
+        self.scale_from_structure = nn.Linear(structure_dim, 1, bias=False)
+        nn.init.zeros_(self.scale_from_structure.weight)  # Start neutral (no effect)
+        
+        # Initialize with orthogonal
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """Initialize with orthogonal A matrix (prevents rank collapse)."""
+        nn.init.orthogonal_(self.lora_A)
+        nn.init.zeros_(self.lora_B)
+    
+    def init_magnitude(self, base_weight: torch.Tensor):
+        """Initialize magnitude from base weight norms."""
+        weight_norm = base_weight.norm(p=2, dim=1)
+        self.magnitude.data = weight_norm.clone()
+        self.register_buffer("base_weight_norm", weight_norm.clone())
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        base_output: torch.Tensor,
+        base_weight: torch.Tensor,
+        structure_prior: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Apply HyLoRADA v2 adaptation with structure conditioning.
+        
+        Args:
+            x: Input tensor [batch, seq, in_features]
+            base_output: Output from frozen base layer
+            base_weight: The frozen base weight matrix
+            structure_prior: Optional [batch, seq, structure_dim] for conditioning
+            
+        Returns:
+            HyLoRADA v2-adapted output
+        """
+        input_dtype = x.dtype
+        x_float = x.to(self.lora_A.dtype)
+        
+        # Compute LoRA contribution
+        lora_x = self.dropout(x_float)
+        lora_x = F.linear(lora_x, self.lora_A)  # [batch, seq, rank]
+        lora_out = F.linear(lora_x, self.lora_B)  # [batch, seq, out_features]
+        delta_v = lora_out * self.scaling
+        
+        # === NEW in v2: Structure-conditioned scaling ===
+        if structure_prior is not None:
+            # [batch, seq, 1] position-dependent scale
+            pos_scale = torch.sigmoid(
+                self.scale_from_structure(structure_prior.to(self.lora_A.dtype))
+            )
+            # Scale delta: positions with high structure signal get boosted
+            # Range [0.5, 1.5] to allow both attenuation and amplification
+            delta_v = delta_v * (0.5 + pos_scale)
+        
+        # === DoRA PATH (from v1) ===
+        updated_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling
+        updated_norm = updated_weight.norm(p=2, dim=1) + 1e-8
+        
+        # Apply gated magnitude (from v1)
+        gate = torch.sigmoid(self.magnitude_gate)
+        effective_magnitude = self.magnitude * gate + self.base_weight_norm * (1 - gate)
+        
+        mag_scale = effective_magnitude / updated_norm
+        dora_output = (base_output.to(self.lora_A.dtype) + delta_v) * mag_scale.unsqueeze(0).unsqueeze(0)
+        
+        # === RESIDUAL LoRA PATH (from v1) ===
+        lora_output = base_output.to(self.lora_A.dtype) + delta_v
+        
+        # Blend DoRA and LoRA with learnable weight
+        residual_w = torch.sigmoid(self.residual_weight)
+        final_output = (1 - residual_w) * dora_output + residual_w * lora_output
+        
+        return final_output.to(input_dtype)
+    
+    def get_delta_weight(self) -> torch.Tensor:
+        """Compute the LoRA weight delta."""
+        return (self.lora_B @ self.lora_A) * self.scaling
+    
+    def extra_repr(self) -> str:
+        return (
+            f"in_features={self.in_features}, out_features={self.out_features}, "
+            f"rank={self.rank}, alpha={self.alpha}, structure_dim={self.structure_dim}, hylorada_v2=True"
+        )
+
+
 class LoRALayer(nn.Module):
     """
     Wrapper that combines a frozen base linear layer with LoRA adapter.
@@ -576,6 +728,84 @@ class HyLoRADALayer(nn.Module):
     def weight(self) -> torch.Tensor:
         """Return effective weight for compatibility."""
         return self._base_weight + self.hylorada.get_delta_weight()
+
+
+class HyLoRADAv2Layer(nn.Module):
+    """
+    HyLoRADA v2 wrapper with structure-aware adaptation.
+    
+    This wrapper accepts an optional structure_prior in forward pass
+    to enable position-dependent LoRA scaling.
+    """
+    
+    def __init__(
+        self,
+        base_layer: nn.Module,
+        rank: int = 8,
+        alpha: float = 16.0,
+        dropout: float = 0.0,
+        structure_dim: int = 32,
+    ):
+        super().__init__()
+        
+        self.base_layer = base_layer
+        
+        # Handle both nn.Linear and Conv1D (GPT-2)
+        if hasattr(base_layer, 'nf'):  # Conv1D from transformers
+            in_features = base_layer.weight.shape[0]
+            out_features = base_layer.nf
+            self.is_conv1d = True
+            self._base_weight = base_layer.weight.T
+        else:  # nn.Linear
+            in_features = base_layer.in_features
+            out_features = base_layer.out_features
+            self.is_conv1d = False
+            self._base_weight = base_layer.weight
+        
+        self.hylorada_v2 = HyLoRADAv2Linear(
+            in_features=in_features,
+            out_features=out_features,
+            rank=rank,
+            alpha=alpha,
+            dropout=dropout,
+            structure_dim=structure_dim,
+        )
+        
+        # Initialize magnitude from base weights
+        with torch.no_grad():
+            self.hylorada_v2.init_magnitude(self._base_weight.data.float())
+        
+        # Freeze base layer
+        for param in self.base_layer.parameters():
+            param.requires_grad = False
+    
+    @property
+    def lora(self):
+        """Compatibility property - returns the HyLoRADA v2 module."""
+        return self.hylorada_v2
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        structure_prior: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Forward pass through frozen base + HyLoRADA v2 adapter.
+        
+        Args:
+            x: Input tensor [batch, seq, in_features]
+            structure_prior: Optional [batch, seq, structure_dim]
+            
+        Returns:
+            Adapted output
+        """
+        base_out = self.base_layer(x)
+        return self.hylorada_v2(x, base_out, self._base_weight, structure_prior)
+    
+    @property
+    def weight(self) -> torch.Tensor:
+        """Return effective weight for compatibility."""
+        return self._base_weight + self.hylorada_v2.get_delta_weight()
 
 
 def _is_linear_layer(module: nn.Module) -> bool:

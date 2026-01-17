@@ -8,6 +8,10 @@ HyLoRADA is a novel Parameter-Efficient Fine-Tuning (PEFT) method that combines 
 2. **Gated Magnitude** - Learnable control over weight magnitude contribution
 3. **Residual LoRA Path** - Blends DoRA and LoRA learning dynamics
 
+**HyLoRADA v2** extends this with:
+
+4. **Structure-Conditioned Scaling** - Position-dependent LoRA adaptation based on structural signals
+
 ## Background
 
 ### LoRA (Low-Rank Adaptation)
@@ -102,6 +106,28 @@ output = (1 - residual_w) * dora_output + residual_w * lora_output
 - Combines strengths of both methods
 - Model learns optimal blend per layer
 - More expressive than either alone
+
+### Innovation 4: Structure-Conditioned Scaling (v2)
+
+HyLoRADA v1 uses a uniform LoRA scaling factor across all positions.
+
+**Problem**: Different positions may require different adaptation strengths:
+- Code: Function headers vs. loop bodies
+- Time series: Periodic peaks vs. steady states
+- Graphs: Hub nodes vs. leaf nodes
+
+**HyLoRADA v2 Solution**: Position-dependent scaling based on structure prior:
+```python
+if structure_prior is not None:
+    pos_scale = sigmoid(scale_from_structure(structure_prior))
+    delta_v = delta_v * (0.5 + pos_scale)  # Range [0.5, 1.5]
+```
+
+**Benefits**:
+- Positions with strong structural signals get boosted adaptation
+- Model learns WHERE to adapt more/less
+- Minimal overhead: +32 params per layer (~0.24% increase)
+- Backward compatible: works without structure prior (falls back to v1)
 
 ## Implementation
 
@@ -230,6 +256,109 @@ hylorada/
 1. Hu et al., "LoRA: Low-Rank Adaptation of Large Language Models" (2021)
 2. Liu et al., "DoRA: Weight-Decomposed Low-Rank Adaptation" (2024)
 3. Hayou et al., "LoRA+: Efficient Low Rank Adaptation of Large Models" (2024)
+4. Chen et al., "LongLoRA: Efficient Fine-tuning of Long-Context LLMs" (2024)
+5. He et al., "SparseAdapter: An Easy Approach for Improving the Parameter-Efficiency" (2022)
+
+---
+
+# HyLoRADA v2: Structure-Aware Architecture
+
+## Overview
+
+HyLoRADA v2 extends v1 with structure-conditioned LoRA scaling, enabling domain-aware adaptation for:
+- **Code**: Respect AST structure, nesting depth
+- **Time Series**: Handle periodicity, multi-scale patterns
+- **Graphs**: Capture node importance, topological features
+
+## Architecture
+
+### Structure Encoder
+
+Unified positional/structural encoding:
+```python
+class StructureEncoder(nn.Module):
+    def __init__(self, hidden_size, encoding_dim=32, num_buckets=64):
+        self.bucket_embeddings = nn.Embedding(num_buckets * 2 + 1, encoding_dim)
+        self.freq_scale = nn.Parameter(torch.ones(encoding_dim // 2))
+        self.structure_embeddings = nn.Embedding(max_structure_types, encoding_dim)
+        self.proj = nn.Linear(encoding_dim, hidden_size, bias=False)
+        self.gate = nn.Parameter(torch.tensor(0.0))
+```
+
+Features:
+- Bucket-based positional encoding (from T5/PositionalDAA)
+- Sinusoidal encoding with learned frequencies
+- Optional structure type embeddings (AST depth, node type)
+- Gated output for gradual learning
+
+### HyLoRADAv2Linear
+
+```python
+class HyLoRADAv2Linear(nn.Module):
+    def __init__(self, in_features, out_features, rank=8, structure_dim=32):
+        # All v1 components preserved
+        self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        self.magnitude = nn.Parameter(torch.ones(out_features))
+        self.magnitude_gate = nn.Parameter(torch.tensor(0.0))
+        self.residual_weight = nn.Parameter(torch.tensor(0.1))
+        
+        # NEW: Structure-to-scale mapping
+        self.scale_from_structure = nn.Linear(structure_dim, 1, bias=False)
+        nn.init.zeros_(self.scale_from_structure.weight)  # Start neutral
+```
+
+### Parameter Count (v2)
+
+| Component | Parameters per Layer |
+|-----------|---------------------|
+| lora_A | r × d_in |
+| lora_B | d_out × r |
+| magnitude | d_out |
+| magnitude_gate | 1 |
+| residual_weight | 1 |
+| **scale_from_structure** | **structure_dim × 1** |
+| **Total (v2)** | r(d_in + d_out) + d_out + 2 + **32** |
+
+For r=8, d=768, structure_dim=32:
+- v1: 13,058 params/layer
+- v2: 13,090 params/layer (+32, 0.24% increase)
+
+## Usage
+
+### Basic v2 Usage
+
+```python
+from hylorada import HyLoRADAConfig, StructureEncoder, HyLoRADAv2Linear
+
+# Enable v2 in config
+config = HyLoRADAConfig(
+    use_hylorada_v2=True,
+    structure_dim=32,
+    structure_encoder_type="default",  # or "temporal"
+)
+
+# Create structure encoder
+encoder = StructureEncoder(hidden_size=32)
+positions = encoder.get_position_tensor(batch_size, seq_len, device)
+structure_prior = encoder(positions)  # [batch, seq, 32]
+
+# v2 adapter with structure conditioning
+adapter = HyLoRADAv2Linear(in_features=768, out_features=768, structure_dim=32)
+output = adapter(x, base_output, base_weight, structure_prior)
+```
+
+### Temporal Encoding (Time Series)
+
+```python
+from hylorada import TemporalStructureEncoder
+
+encoder = TemporalStructureEncoder(
+    hidden_size=32,
+    num_periods=4,  # Learn 4 period lengths
+)
+# Captures seasonality (hour, week, month, year patterns)
+```
 
 ---
 
@@ -238,7 +367,7 @@ hylorada/
 ## Evolution Path
 
 ```
-LoRA (2021) → DoRA (2024) → HyLoRADA (2026)
+LoRA (2021) → DoRA (2024) → HyLoRADA v1 (2026) → HyLoRADA v2 (2026)
 ```
 
 ### Stage 1: LoRA (Hu et al., 2021)
@@ -287,6 +416,23 @@ LoRA (2021) → DoRA (2024) → HyLoRADA (2026)
 | Residual Path | Single pathway | Hybrid LoRA+DoRA dynamics |
 
 **Metrics**: PPL 27.01 (-3.41 vs DoRA, 11% better), 2.2M params
+
+---
+
+### Stage 4: HyLoRADA v2 (2026) - Structure-Aware Extension
+
+**Evolution**: Added structure-conditioned scaling for domain-aware adaptation
+
+| Innovation | Addresses | Improvement |
+|------------|-----------|-------------|
+| Structure Encoder | Uniform adaptation | Position-aware scaling |
+| Scale Projection | Domain-agnostic | Code/TS/Graph-aware |
+| Temporal Encoder | Fixed position encoding | Learnable periodicity |
+
+**Key Features**:
+- Only +32 params per layer (~0.24% overhead)
+- Backward compatible with v1
+- Supports multiple domains without architecture changes
 
 ---
 

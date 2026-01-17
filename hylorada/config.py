@@ -54,6 +54,12 @@ class HyLoRADAConfig:
     # HyLoRADA: Novel method with orthogonal init + gated magnitude + residual LoRA
     use_hylorada: bool = False  # Enable HyLoRADA (our novel method)
     
+    # ============ HyLoRADA v2 Settings (Structure-Aware Adaptation) ============
+    use_hylorada_v2: bool = False  # Enable HyLoRADA v2 with structure conditioning
+    structure_dim: int = 32  # Dimension of structure prior
+    structure_encoder_type: str = "default"  # "default", "temporal", or "graph"
+    structure_num_buckets: int = 64  # Position buckets for structure encoder
+    
     # LoRA+: Asymmetric learning rates (higher for B matrix)
     lora_plus_enabled: bool = False  # Enable LoRA+ learning rate scheduling
     lora_plus_ratio: float = 10.0  # lr_B / lr_A ratio (paper recommends 10)
@@ -122,6 +128,7 @@ class HyLoRADAConfig:
         """Return enabled/disabled status of each component."""
         return {
             "lora": True,  # LoRA is always enabled
+            "hylorada_v2": self.use_hylorada_v2,
             "daa": self.daa_enabled,
             "sparse_mlp": self.sparse_enabled,
             "s2_attn": self.s2_attn_enabled,

@@ -2,10 +2,21 @@
 # Efficient Long-Context Fine-Tuning Framework
 
 from hylorada.config import HyLoRADAConfig
-from hylorada.lora import LoRALinear, HyLoRADALinear, apply_lora_to_model
+from hylorada.lora import (
+    LoRALinear, 
+    HyLoRADALinear, 
+    HyLoRADAv2Linear,
+    HyLoRADAv2Layer,
+    apply_lora_to_model,
+)
 from hylorada.daa import DirectAttentionAdapter
 from hylorada.sparse_mlp import SparseMLP, SparseAdapter
 from hylorada.s2_attention import ShiftedSparseAttention
+from hylorada.structure_encoder import (
+    StructureEncoder,
+    TemporalStructureEncoder,
+    create_structure_encoder,
+)
 from hylorada.model import HyLoRADAModel, apply_hylorada
 from hylorada.evaluation import (
     evaluate_perplexity,
@@ -22,15 +33,21 @@ from hylorada.baselines import (
     get_baseline_model,
 )
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"  # Updated for v2
 __all__ = [
     "HyLoRADAConfig",
     "LoRALinear",
+    "HyLoRADALinear",
+    "HyLoRADAv2Linear",
+    "HyLoRADAv2Layer",
     "apply_lora_to_model",
     "DirectAttentionAdapter",
     "SparseMLP",
     "SparseAdapter",
     "ShiftedSparseAttention",
+    "StructureEncoder",
+    "TemporalStructureEncoder",
+    "create_structure_encoder",
     "HyLoRADAModel",
     "apply_hylorada",
     "evaluate_perplexity",
