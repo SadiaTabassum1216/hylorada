@@ -126,23 +126,24 @@ def main():
     # Load data
     print("[2] Loading data...")
     if args.dataset == "code":
-        # CodeSearchNet for code summarization (Software Engineering task)
-        dataset = load_dataset("code_search_net", "python", trust_remote_code=True)
+        # The Stack Smol - Python code (Software Engineering task)
+        dataset = load_dataset("bigcode/the-stack-smol", "data/python", split="train")
         
         def format_code_sample(sample):
-            code = sample.get("func_code_string", sample.get("whole_func_string", ""))
-            docstring = sample.get("func_documentation_string", "")
-            if code and docstring:
-                return f"# Code:\n{code[:500]}\n\n# Summary:\n{docstring[:200]}"
+            code = sample.get("content", "")
+            if code and len(code) > 100:
+                # Use first 500 chars as code, format for LM task
+                return f"# Python Code:\n{code[:800]}"
             return None
         
-        train_texts = [format_code_sample(s) for s in dataset["train"]]
-        train_texts = [t for t in train_texts if t and len(t) > 50][:args.num_train]
+        all_texts = [format_code_sample(s) for s in dataset]
+        all_texts = [t for t in all_texts if t][:args.num_train + args.num_test]
         
-        test_texts = [format_code_sample(s) for s in dataset["test"]]
-        test_texts = [t for t in test_texts if t and len(t) > 50][:args.num_test]
+        split_idx = int(len(all_texts) * 0.8)
+        train_texts = all_texts[:split_idx][:args.num_train]
+        test_texts = all_texts[split_idx:][:args.num_test]
         
-        print(f"    Dataset: CodeSearchNet (Python) - Code Summarization")
+        print(f"    Dataset: The Stack Smol (Python) - Code Modeling")
     else:
         # WikiText (default)
         dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
