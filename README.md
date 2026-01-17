@@ -4,11 +4,13 @@ HyLoRADA is a novel parameter-efficient fine-tuning method for LLMs.
 
 ## Novel Contributions
 
-HyLoRADA improves upon DoRA with three key innovations:
-
+### HyLoRADA v1
 1. **Orthogonal Initialization** - Prevents rank collapse during training
 2. **Gated Magnitude** - Learnable control over weight magnitude contribution
 3. **Residual LoRA Path** - Blends DoRA and LoRA learning dynamics
+
+### HyLoRADA v2 (New!)
+4. **Structure-Conditioned Scaling** - Position-dependent LoRA adaptation for code, time series, and graph data
 
 ## Benchmark Results
 
@@ -17,7 +19,7 @@ HyLoRADA improves upon DoRA with three key innovations:
 | LoRA | 540K | 31.79 | 25.60 |
 | DoRA | 1.1M | 30.42 | 24.45 |
 | LoRaDA | 1.0M | 30.40 | 24.27 |
-| **HyLoRADA** | 2.2M | **27.01** | **19.66** |
+| **HyLoRADA v1** | 2.2M | **27.01** | **19.66** |
 
 **Improvements over DoRA**: -3.41 PPL (11% better)  
 **Improvements on LiM**: -4.61 PPL (19% better)
@@ -25,51 +27,46 @@ HyLoRADA improves upon DoRA with three key innovations:
 ## Setup
 
 ```bash
-# Create virtual environment
-python -m venv venv
-
-# Activate (Windows)
-.\venv\Scripts\Activate
-
-# Activate (Linux/Mac)
-source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
 ## Quick Start
 
+### HyLoRADA v1
 ```python
 from transformers import AutoModelForCausalLM
 from hylorada import HyLoRADAConfig, HyLoRADAModel
 
-# Load base model
 model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B")
-
-# Apply HyLoRADA
 config = HyLoRADAConfig(
     lora_rank=16,
-    lora_alpha=47.2,
     use_hylorada=True,
     lora_plus_enabled=True,
-    lora_plus_ratio=17.1,
 )
 hylorada_model = HyLoRADAModel(model, config)
-hylorada_model.print_trainable_params()
 ```
 
-## Benchmark All Methods
+### HyLoRADA v2 (Structure-Aware)
+```python
+from hylorada import HyLoRADAConfig, StructureEncoder, HyLoRADAv2Linear
+
+config = HyLoRADAConfig(
+    use_hylorada_v2=True,
+    structure_dim=32,
+)
+
+# Create structure encoder for position-aware scaling
+encoder = StructureEncoder(hidden_size=32)
+```
+
+## Run Benchmarks
 
 ```bash
+# Standard benchmark
 python run_benchmark.py --methods lora dora lorada hylorada --epochs 3
-```
 
-## Hyperparameter Optimization
-
-```bash
-pip install optuna
-python optimize_hylorada.py --n_trials 15 --epochs 2
+# Code task (v2)
+python run_code_task.py --use_v2 --epochs 3
 ```
 
 ## Project Structure
@@ -77,16 +74,19 @@ python optimize_hylorada.py --n_trials 15 --epochs 2
 ```
 hylorada/
 ├── hylorada/
-│   ├── config.py       # Configuration
-│   ├── lora.py         # LoRA / DoRA / HyLoRADA
-│   ├── model.py        # HyLoRADAModel wrapper
-│   ├── baselines.py    # Baseline methods
-│   ├── trainer.py      # Training utilities
-│   └── evaluation.py   # Metrics
-├── run_benchmark.py    # Benchmark script
-├── optimize_hylorada.py # Bayesian HPO
-├── METHODOLOGY.md      # Technical documentation
-└── tests/              # Unit tests
+│   ├── config.py            # Configuration
+│   ├── lora.py              # LoRA / DoRA / HyLoRADA v1 & v2
+│   ├── structure_encoder.py # Structure encoder (v2)
+│   ├── model.py             # HyLoRADAModel wrapper
+│   ├── daa.py               # Direct Attention Adaptation
+│   ├── sparse_mlp.py        # Sparse MLP adapters
+│   ├── trainer.py           # Training utilities
+│   └── evaluation.py        # Metrics
+├── run_benchmark.py         # Benchmark script
+├── run_code_task.py         # Code task training
+├── optimize_hylorada.py     # Bayesian HPO
+├── METHODOLOGY.md           # Technical documentation
+└── tests/                   # Unit tests
 ```
 
 ## Testing
@@ -94,3 +94,8 @@ hylorada/
 ```bash
 python -m pytest tests/ -v
 ```
+
+## Version
+
+- **v0.2.0** - Added HyLoRADA v2 with structure-aware adaptation
+- **v0.1.0** - Initial release with HyLoRADA v1

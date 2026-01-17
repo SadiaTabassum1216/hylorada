@@ -155,17 +155,23 @@ def train_hylorada_v2_code(args):
     # Training config
     training_config = TrainingConfig(
         num_epochs=args.epochs,
-        per_device_batch_size=args.batch_size,
         learning_rate=args.lr,
         warmup_ratio=0.1,
         gradient_accumulation_steps=args.grad_accum,
-        log_every=50,
+        logging_steps=50,
+        output_dir=args.save_dir or "./results_code",
     )
     
     # Train
     print(f"\n[3] Training for {args.epochs} epochs...")
-    trainer = HyLoRADATrainer(hylorada_model, training_config)
-    trainer.train(train_loader)
+    trainer = HyLoRADATrainer(
+        model=hylorada_model,
+        train_dataloader=train_loader,
+        eval_dataloader=test_loader,
+        config=training_config,
+    )
+    trainer.train()
+
     
     # Evaluate
     print("\n[4] Evaluating...")
