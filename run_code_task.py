@@ -72,25 +72,33 @@ def load_code_dataset(tokenizer, max_length=1024, num_train=1000, num_test=100):
         ] * (num_train // 4 + 1)
         dataset = {"train": code_samples[:num_train], "test": code_samples[:num_test]}
     
-    # Tokenize
-    def tokenize(texts):
-        encodings = tokenizer(
-            texts,
-            truncation=True,
-            max_length=max_length,
-            padding="max_length",
-            return_tensors="pt",
-        )
-        return torch.utils.data.TensorDataset(
-            encodings["input_ids"],
-            encodings["attention_mask"],
-        )
+    # Custom dataset that returns dicts
+    class CodeDataset(torch.utils.data.Dataset):
+        def __init__(self, texts, tokenizer, max_length):
+            self.encodings = tokenizer(
+                texts,
+                truncation=True,
+                max_length=max_length,
+                padding="max_length",
+                return_tensors="pt",
+            )
+        
+        def __len__(self):
+            return self.encodings["input_ids"].shape[0]
+        
+        def __getitem__(self, idx):
+            return {
+                "input_ids": self.encodings["input_ids"][idx],
+                "attention_mask": self.encodings["attention_mask"][idx],
+                "labels": self.encodings["input_ids"][idx],  # Causal LM labels
+            }
     
-    train_dataset = tokenize(dataset["train"])
-    test_dataset = tokenize(dataset["test"])
+    train_dataset = CodeDataset(dataset["train"], tokenizer, max_length)
+    test_dataset = CodeDataset(dataset["test"], tokenizer, max_length)
     
     print(f"  Train: {len(train_dataset)}, Test: {len(test_dataset)}")
     return train_dataset, test_dataset
+
 
 
 def train_hylorada_v2_code(args):
