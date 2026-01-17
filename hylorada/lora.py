@@ -658,13 +658,22 @@ def apply_lora_to_model(
 
 
 def get_lora_params(model: nn.Module) -> List[nn.Parameter]:
-    """Get all LoRA parameters from a model."""
+    """Get all LoRA/DoRA/HyLoRADA parameters from a model."""
     params = []
     for module in model.modules():
-        if isinstance(module, LoRALinear):
+        # Check for all LoRA variants
+        if isinstance(module, (LoRALinear, DoRALinear, HyLoRADALinear)):
             params.extend([module.lora_A, module.lora_B])
-            if module.bias is not None:
+            if hasattr(module, 'bias') and module.bias is not None:
                 params.append(module.bias)
+            # DoRA/HyLoRADA magnitude
+            if hasattr(module, 'magnitude'):
+                params.append(module.magnitude)
+            # HyLoRADA gate and residual
+            if hasattr(module, 'magnitude_gate'):
+                params.append(module.magnitude_gate)
+            if hasattr(module, 'residual_weight'):
+                params.append(module.residual_weight)
     return params
 
 

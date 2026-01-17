@@ -172,6 +172,9 @@ def main():
         sparse_target_layers=args.sparse_layers,
     )
     
+    # Create output directory
+    os.makedirs(args.output_dir, exist_ok=True)
+    
     results = {}
     
     for i, method in enumerate(args.methods):
