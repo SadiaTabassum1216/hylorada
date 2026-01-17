@@ -2,10 +2,14 @@
 PEFT Methods Benchmark Script
 
 Compare HyLoRADA against other PEFT methods with identical hyperparameters.
-Methods: Baseline, LoRA, LoRaDA, LongLoRA, SparseAdapter, HyLoRADA
+Methods: LoRA, DoRA, LoRaDA, LongLoRA, SparseAdapter, HyLoRADA
+
+Datasets:
+  - wikitext: WikiText-2 language modeling (default)
+  - code: CodeSearchNet Python code summarization (Software Engineering)
 
 Usage:
-    python run_benchmark.py --model Qwen/Qwen2-0.5B --epochs 3
+    python run_benchmark.py --dataset code --methods lora dora hylorada --epochs 3
 """
 
 import argparse
@@ -85,6 +89,9 @@ def main():
     parser.add_argument("--num_test", type=int, default=100)
     parser.add_argument("--lora_rank", type=int, default=8)
     parser.add_argument("--output_dir", type=str, default="./benchmark_results")
+    parser.add_argument("--dataset", type=str, default="wikitext",
+                        choices=["wikitext", "code"],
+                        help="Dataset: 'wikitext' (language) or 'code' (CodeSearchNet)")
     parser.add_argument("--methods", nargs="+", 
                         default=["baseline", "lora", "lorada", "longlora", "sparse", "hylorada"])
     parser.add_argument("--sparse_dim", type=int, default=128,
@@ -104,6 +111,7 @@ def main():
     print("PEFT Methods Benchmark")
     print("=" * 70)
     print(f"Model: {args.model}")
+    print(f"Dataset: {args.dataset}")
     print(f"Methods: {', '.join(args.methods)}")
     print(f"Hyperparameters: epochs={args.epochs}, batch={args.batch_size}, lr={args.lr}")
     print(f"Max Length: {args.max_length}, LoRA Rank: {args.lora_rank}")
@@ -117,9 +125,31 @@ def main():
     
     # Load data
     print("[2] Loading data...")
-    dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
-    train_texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 50][:args.num_train]
-    test_texts = [t for t in dataset["test"]["text"] if len(t.strip()) > 50][:args.num_test]
+    if args.dataset == "code":
+        # CodeSearchNet for code summarization (Software Engineering task)
+        dataset = load_dataset("code_search_net", "python", trust_remote_code=True)
+        
+        def format_code_sample(sample):
+            code = sample.get("func_code_string", sample.get("whole_func_string", ""))
+            docstring = sample.get("func_documentation_string", "")
+            if code and docstring:
+                return f"# Code:\n{code[:500]}\n\n# Summary:\n{docstring[:200]}"
+            return None
+        
+        train_texts = [format_code_sample(s) for s in dataset["train"]]
+        train_texts = [t for t in train_texts if t and len(t) > 50][:args.num_train]
+        
+        test_texts = [format_code_sample(s) for s in dataset["test"]]
+        test_texts = [t for t in test_texts if t and len(t) > 50][:args.num_test]
+        
+        print(f"    Dataset: CodeSearchNet (Python) - Code Summarization")
+    else:
+        # WikiText (default)
+        dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
+        train_texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 50][:args.num_train]
+        test_texts = [t for t in dataset["test"]["text"] if len(t.strip()) > 50][:args.num_test]
+        print(f"    Dataset: WikiText-2 - Language Modeling")
+    
     print(f"    Train: {len(train_texts)}, Test: {len(test_texts)}")
     
     # Baseline config for comparison methods
@@ -235,6 +265,20 @@ def main():
             }
             
             print(f"  ✓ {method}: PPL={eval_results['perplexity']:.2f}, Params={params:,}, Time={train_time:.1f}s")
+            
+            # Save checkpoint for qualitative analysis
+            checkpoint_path = os.path.join(args.output_dir, f"{method}_checkpoint.pt")
+            trainable_state = {
+                name: param.cpu() for name, param in model.named_parameters() 
+                if param.requires_grad
+            }
+            torch.save({
+                "method": method,
+                "trainable_params": trainable_state,
+                "config": vars(args),
+                "eval_results": eval_results,
+            }, checkpoint_path)
+            print(f"  Saved checkpoint: {checkpoint_path}")
             
             # Cleanup
             del base_model, model

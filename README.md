@@ -1,6 +1,6 @@
 # HyLoRADA
 
-**Hybrid Low-Rank Direct Attention Adaptation** - A novel parameter-efficient fine-tuning method for LLMs.
+HyLoRADA is a novel parameter-efficient fine-tuning method for LLMs.
 
 ## Novel Contributions
 
@@ -14,10 +14,13 @@ HyLoRADA improves upon DoRA with three key innovations:
 
 | Method | Params | PPL | LiM PPL |
 |--------|--------|-----|---------|
-| LoRA | 540K | 32.11 | 25.58 |
-| LoRaDA | 1.0M | 30.06 | 24.24 |
-| DoRA | 1.1M | 29.91 | 24.24 |
-| **HyLoRADA** | 1.1M | **29.24** | **23.37** |
+| LoRA | 540K | 31.79 | 25.60 |
+| DoRA | 1.1M | 30.42 | 24.45 |
+| LoRaDA | 1.0M | 30.40 | 24.27 |
+| **HyLoRADA** | 2.2M | **27.01** | **19.66** |
+
+**Improvements over DoRA**: -3.41 PPL (11% better)  
+**Improvements on LiM**: -4.61 PPL (19% better)
 
 ## Setup
 
@@ -69,23 +72,6 @@ pip install optuna
 python optimize_hylorada.py --n_trials 15 --epochs 2
 ```
 
-## Baseline Methods
-
-| Method | Description |
-|--------|-------------|
-| **LoRA** | Standard low-rank adaptation |
-| **DoRA** | Weight-decomposed LoRA |
-| **LoRaDA** | LoRA + Direct Attention Adaptation |
-| **HyLoRADA** | Our method (orthogonal + gated + residual) |
-
-```python
-from hylorada import StandardLoRA, LoRaDAModel
-
-# Use baselines for comparison
-model = StandardLoRA(base_model)
-model = LoRaDAModel(base_model)
-```
-
 ## Project Structure
 
 ```
@@ -107,15 +93,4 @@ hylorada/
 
 ```bash
 python -m pytest tests/ -v
-```
-
-## Citation
-
-```bibtex
-@misc{hylorada2026,
-  title={HyLoRADA: Hybrid Low-Rank Direct Attention Adaptation},
-  author={Sadia Tabassum},
-  year={2026},
-  url={https://github.com/SadiaTabassum1216/hylorada}
-}
 ```

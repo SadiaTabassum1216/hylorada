@@ -231,13 +231,156 @@ hylorada/
 2. Liu et al., "DoRA: Weight-Decomposed Low-Rank Adaptation" (2024)
 3. Hayou et al., "LoRA+: Efficient Low Rank Adaptation of Large Models" (2024)
 
-## Citation
+---
 
-```bibtex
-@misc{hylorada2026,
-  title={HyLoRADA: Hybrid Low-Rank Direct Attention Adaptation},
-  author={Your Name},
-  year={2026},
-  url={https://github.com/SadiaTabassum1216/hylorada}
-}
+# Software Evolution & Reengineering Analysis
+
+## Evolution Path
+
 ```
+LoRA (2021) → DoRA (2024) → HyLoRADA (2026)
+```
+
+### Stage 1: LoRA (Hu et al., 2021)
+
+**Core Idea**: Low-rank decomposition for weight updates
+
+**Limitations Identified**:
+| Issue | Description | Impact |
+|-------|-------------|--------|
+| No magnitude control | Weight norms can drift | Unstable training |
+| Kaiming initialization | Can cause rank collapse | Reduced expressiveness |
+| Fixed learning dynamics | No adaptation between layers | Suboptimal convergence |
+
+**Metrics**: PPL 31.79, 540K params
+
+---
+
+### Stage 2: DoRA (Liu et al., 2024)
+
+**Evolution**: Added weight decomposition (magnitude + direction)
+
+**Improvements over LoRA**:
+- Separates magnitude from direction learning
+- More stable gradient flow
+- Better fine-tuning performance
+
+**Remaining Limitations**:
+| Issue | Description | Impact |
+|-------|-------------|--------|
+| Static magnitude | No input-dependent control | Limited adaptability |
+| No rank preservation | Kaiming init still used | Potential collapse |
+| Single pathway | No hybrid learning | Missed optimization opportunities |
+
+**Metrics**: PPL 30.42 (-1.37 vs LoRA), 1.1M params
+
+---
+
+### Stage 3: HyLoRADA (2026) - This Work
+
+**Evolution**: Three novel improvements
+
+| Innovation | Addresses | Improvement |
+|------------|-----------|-------------|
+| Orthogonal Init | Rank collapse | Stable rank preservation |
+| Gated Magnitude | Static magnitude | Adaptive control |
+| Residual Path | Single pathway | Hybrid LoRA+DoRA dynamics |
+
+**Metrics**: PPL 27.01 (-3.41 vs DoRA, 11% better), 2.2M params
+
+---
+
+## Code Smells in DoRA (Reengineering Analysis)
+
+### Identified Issues
+
+| Code Smell | Location | Problem |
+|------------|----------|---------|
+| **Hardcoded Initialization** | `nn.init.kaiming_uniform_()` | Not optimal for low-rank matrices |
+| **Rigid Magnitude** | Fixed learnable parameter | No adaptive control mechanism |
+| **Monolithic Forward** | Single computation path | No flexibility in learning dynamics |
+| **Missing Modularity** | Tightly coupled components | Hard to extend or modify |
+
+### Refactoring Applied
+
+```diff
+# Before (DoRA)
+- nn.init.kaiming_uniform_(self.lora_A, a=math.sqrt(5))
+- output = magnitude * normalized_direction
+
+# After (HyLoRADA)
++ nn.init.orthogonal_(self.lora_A)  # Refactoring 1
++ gate = torch.sigmoid(self.magnitude_gate)  # Refactoring 2
++ effective_mag = magnitude * gate + init_mag * (1 - gate)
++ output = (1-β) * dora_path + β * lora_path  # Refactoring 3
+```
+
+### Before/After Comparison
+
+| Aspect | DoRA (Before) | HyLoRADA (After) |
+|--------|---------------|------------------|
+| A Matrix Init | Kaiming uniform | Orthogonal |
+| Magnitude | Static learnable | Gated adaptive |
+| Output Path | Single (DoRA) | Dual (DoRA + LoRA) |
+| Learnable Params | 2 per layer | 4 per layer |
+| Flexibility | Low | High |
+
+---
+
+## Code Metrics Analysis
+
+### Lines of Code (LOC)
+
+| Module | Lines | Purpose |
+|--------|-------|---------|
+| `lora.py` | 1,008 | LoRA/DoRA/HyLoRADA adapters |
+| `model.py` | 479 | Model wrapper |
+| `config.py` | 197 | Configuration |
+| `trainer.py` | 430 | Training loop |
+| `baselines.py` | 429 | Comparison methods |
+| **Total Core** | **2,543** | Main implementation |
+
+### Cyclomatic Complexity (Estimated)
+
+| Function | Complexity | Note |
+|----------|------------|------|
+| `HyLoRADALinear.forward()` | 4 | Moderate (gating + blending) |
+| `apply_hylorada_adapter_to_model()` | 3 | Low (loop with conditions) |
+| `HyLoRADAModel._apply_hylorada()` | 5 | Moderate (multiple branches) |
+
+### Dependency Graph
+
+```
+hylorada
+├── config.py (standalone)
+├── lora.py → config.py
+├── daa.py (standalone)
+├── sparse_mlp.py (standalone)
+├── model.py → lora.py, daa.py, sparse_mlp.py, config.py
+├── trainer.py → model.py, config.py
+└── baselines.py → lora.py, daa.py, sparse_mlp.py
+```
+
+### Test Coverage
+
+| Module | Test Class | Coverage |
+|--------|------------|----------|
+| `config.py` | `TestConfig` | Config validation, presets |
+| `lora.py` | `TestLoRA` | LoRA forward, freezing, delta |
+| `daa.py` | `TestDAA` | DAA modulation, positional |
+| `sparse_mlp.py` | `TestSparseMLP` | TopK, sparsity |
+| `model.py` | `TestIntegration` | End-to-end |
+
+Run tests: `pytest tests/ -v`
+
+---
+
+## Summary: Software Evolution Contribution
+
+| Aspect | Contribution |
+|--------|--------------|
+| **Evolution** | LoRA → DoRA → HyLoRADA progression |
+| **Reengineering** | Identified 4 code smells, applied 3 refactorings |
+| **Metrics** | 11% PPL improvement, 19% LiM improvement |
+| **Code Quality** | Modular design, 2.5K LOC, comprehensive tests |
+
