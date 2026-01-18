@@ -77,6 +77,74 @@ def evaluate_model(model, tokenizer, test_texts, max_length):
     }
 
 
+def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
+    """
+    Load dataset by name. Supports:
+    - wikitext: WikiText-2 (short context, default)
+    - code: MultiPL-E Python code
+    - longbench: LongBench multi-task (long context 4K-8K)
+    - pg19: PG19 books (very long context)
+    """
+    if dataset_name == "wikitext":
+        dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
+        train_texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 50][:num_train]
+        test_texts = [t for t in dataset["test"]["text"] if len(t.strip()) > 50][:num_test]
+        print(f"    Dataset: WikiText-2 (short context)")
+        
+    elif dataset_name == "code":
+        try:
+            dataset = load_dataset("nuprl/MultiPL-E", "humaneval-py", split="test")
+            texts = [f"# Python:\\n{s['prompt']}" for s in dataset if s.get("prompt")]
+            while len(texts) < num_train + num_test:
+                texts = texts + texts
+            train_texts = texts[:num_train]
+            test_texts = texts[num_train:num_train + num_test]
+            print(f"    Dataset: MultiPL-E Python")
+        except:
+            print(f"    Warning: Code dataset failed, using wikitext")
+            return load_dataset_by_name("wikitext", num_train, num_test, max_length)
+            
+    elif dataset_name == "longbench":
+        # LongBench - multi-task long context benchmark
+        try:
+            dataset = load_dataset("THUDM/LongBench", "qasper", split="test")
+            texts = []
+            for sample in dataset:
+                context = sample.get("context", "")
+                if len(context) > 500:  # Only long samples
+                    texts.append(context[:max_length * 4])  # Truncate very long
+            while len(texts) < num_train + num_test:
+                texts = texts + texts
+            train_texts = texts[:num_train]
+            test_texts = texts[num_train:num_train + num_test]
+            print(f"    Dataset: LongBench/qasper (4K-8K context)")
+        except Exception as e:
+            print(f"    Warning: LongBench failed ({e}), using wikitext")
+            return load_dataset_by_name("wikitext", num_train, num_test, max_length)
+            
+    elif dataset_name == "pg19":
+        # PG19 - books (very long context)
+        try:
+            dataset = load_dataset("pg19", split="train", streaming=True)
+            texts = []
+            for i, sample in enumerate(dataset):
+                if i >= num_train + num_test:
+                    break
+                text = sample.get("text", "")[:max_length * 8]  # Books are very long
+                if len(text) > 1000:
+                    texts.append(text)
+            train_texts = texts[:num_train]
+            test_texts = texts[num_train:num_train + num_test]
+            print(f"    Dataset: PG19 books (very long context)")
+        except Exception as e:
+            print(f"    Warning: PG19 failed ({e}), using wikitext")
+            return load_dataset_by_name("wikitext", num_train, num_test, max_length)
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
+    
+    return train_texts, test_texts
+
+
 def main():
     parser = argparse.ArgumentParser(description="Benchmark PEFT Methods")
     parser.add_argument("--model", type=str, default="Qwen/Qwen2-0.5B")
@@ -90,14 +158,16 @@ def main():
     parser.add_argument("--lora_rank", type=int, default=8)
     parser.add_argument("--output_dir", type=str, default="./benchmark_results")
     parser.add_argument("--dataset", type=str, default="wikitext",
-                        choices=["wikitext", "code"],
-                        help="Dataset: 'wikitext' (language) or 'code' (CodeSearchNet)")
+                        choices=["wikitext", "code", "longbench", "pg19"],
+                        help="Dataset: wikitext, code, longbench (long context), pg19 (books)")
     parser.add_argument("--methods", nargs="+", 
                         default=["baseline", "lora", "lorada", "longlora", "sparse", "hylorada"])
     parser.add_argument("--sparse_dim", type=int, default=128,
                         help="Sparse adapter bottleneck dimension (default: 128, lite: 32)")
     parser.add_argument("--sparse_layers", type=str, default=None,
                         help="Comma-separated layer indices for sparse (e.g., '0,5,10,15,20,23')")
+    parser.add_argument("--s2_attn", action="store_true",
+                        help="Enable S²-Attn for long context (4096+)")
     args = parser.parse_args()
     
     # Parse sparse_layers if provided
@@ -125,42 +195,9 @@ def main():
     
     # Load data
     print("[2] Loading data...")
-    if args.dataset == "code":
-        # MultiPL-E - Python code benchmark (Parquet format, no scripts)
-        try:
-            dataset = load_dataset("nuprl/MultiPL-E", "humaneval-py", split="test")
-            
-            def format_code_sample(sample):
-                prompt = sample.get("prompt", "")
-                if prompt and len(prompt) > 50:
-                    return f"# Python Code:\n{prompt}"
-                return None
-            
-            all_texts = [format_code_sample(s) for s in dataset]
-            all_texts = [t for t in all_texts if t]
-            
-            # Duplicate if not enough samples
-            while len(all_texts) < args.num_train + args.num_test:
-                all_texts = all_texts + all_texts
-            
-            split_idx = int(len(all_texts) * 0.8)
-            train_texts = all_texts[:split_idx][:args.num_train]
-            test_texts = all_texts[split_idx:][:args.num_test]
-            
-            print(f"    Dataset: MultiPL-E (Python) - Code Completion")
-        except Exception as e:
-            print(f"    Warning: Code dataset failed ({e}), falling back to WikiText")
-            dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
-            train_texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 50][:args.num_train]
-            test_texts = [t for t in dataset["test"]["text"] if len(t.strip()) > 50][:args.num_test]
-            print(f"    Dataset: WikiText-2 (fallback)")
-    else:
-        # WikiText (default)
-        dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
-        train_texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 50][:args.num_train]
-        test_texts = [t for t in dataset["test"]["text"] if len(t.strip()) > 50][:args.num_test]
-        print(f"    Dataset: WikiText-2 - Language Modeling")
-    
+    train_texts, test_texts = load_dataset_by_name(
+        args.dataset, args.num_train, args.num_test, args.max_length
+    )
     print(f"    Train: {len(train_texts)}, Test: {len(test_texts)}")
     
     # Baseline config for comparison methods
@@ -221,14 +258,18 @@ def main():
                 # - Gated magnitude (learnable magnitude control)
                 # - Residual LoRA path (blends DoRA + LoRA dynamics)
                 # - Position-aware scaling (handles lost-in-middle)
+                # - S²-Attn for long context (optional)
                 config = HyLoRADAConfig(
-                    lora_rank=16,  # Optimized
-                    lora_alpha=47.2,  # Optimized: rank * ~3
+                    lora_rank=args.lora_rank,
+                    lora_alpha=args.lora_rank * 3,
                     lora_dropout=0.01,
                     lora_plus_enabled=True,
                     lora_plus_ratio=17.1,
-                    daa_enabled=False,  # DAA separate for benchmark
+                    daa_enabled=True,
                     sparse_enabled=False,
+                    s2_attn_enabled=args.s2_attn,
+                    s2_group_size=2048,
+                    max_sequence_length=args.max_length,
                 )
                 model = HyLoRADAModel(base_model, config)
                 

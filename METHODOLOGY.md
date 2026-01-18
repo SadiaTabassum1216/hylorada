@@ -2,16 +2,17 @@
 
 ## Overview
 
-HyLoRADA is a unified PEFT method combining four key innovations:
+HyLoRADA is a unified PEFT method with five key innovations:
 
-1. **Orthogonal Initialization** - Prevents rank collapse
-2. **Gated Magnitude** - Adaptive weight control
-3. **Residual LoRA+DoRA Blend** - Best of both dynamics
-4. **Position-Scaled Adaptation** - Handles lost-in-middle (64 params!)
+| Feature | Solution | Params |
+|---------|----------|--------|
+| **Rank Collapse Prevention** | Orthogonal init for A matrix | 0 |
+| **Adaptive Magnitude** | Gated magnitude control | +1/layer |
+| **Best of LoRA+DoRA** | Residual blend (learnable β) | +1/layer |
+| **Lost-in-Middle** | PositionBias (log bucketing) | 64 shared |
+| **Noise Filtering** | PositionalDAA | ~2K/layer |
 
-## Architecture
-
-### Core Formula
+## Core Formula
 
 ```
 output = (1 - β) * DoRA_output + β * LoRA_output
@@ -23,7 +24,7 @@ Where:
 - `δ = (α/r) * x @ A^T @ B^T * pos_scale`
 - `pos_scale = 1 + σ(position_scale) * tanh(position_bias[pos])`
 
-### Parameter Count
+## Parameter Count
 
 | Component | Params per Layer |
 |-----------|------------------|
@@ -41,8 +42,6 @@ For r=8, d=896: **~15K per layer + 64 shared**
 
 ### HyLoRADAUnified (lora.py)
 
-Single class with all features:
-
 ```python
 class HyLoRADAUnified(nn.Module):
     def __init__(self, in_features, out_features, rank=8, alpha=16.0,
@@ -53,12 +52,9 @@ class HyLoRADAUnified(nn.Module):
         self.magnitude_gate = nn.Parameter(...)  # scalar
         self.residual_weight = nn.Parameter(...) # scalar
         self.position_scale = nn.Parameter(...)  # scalar
-        self.position_bias = position_bias  # shared reference
 ```
 
 ### PositionBias (lora.py)
-
-Ultra-lightweight position table (64 params total):
 
 ```python
 class PositionBias(nn.Module):
@@ -70,23 +66,11 @@ Uses logarithmic bucketing for distant positions.
 
 ### PositionalDAA (daa.py)
 
-Noise filtering via attention modulation:
-
 ```python
 attn' = α * attn + β + position_bias[bucket(q_pos, k_pos)]
 ```
 
-## Benchmark Results
-
-| Method | Params | PPL | LiM PPL | Improvement |
-|--------|--------|-----|---------|-------------|
-| LoRA | 540K | 31.79 | 25.60 | baseline |
-| DoRA | 1.1M | 30.42 | 24.45 | -4.3% |
-| **HyLoRADA** | 1.5M | **27.01** | **19.66** | **-15%** |
-
 ## Usage
-
-### Basic
 
 ```python
 from hylorada import HyLoRADAConfig, HyLoRADAModel
@@ -95,31 +79,17 @@ config = HyLoRADAConfig(lora_rank=8)
 model = HyLoRADAModel(base_model, config)
 ```
 
-### Config Options
+## Config Options
 
 ```python
 HyLoRADAConfig(
     lora_rank=8,              # LoRA rank
     lora_alpha=16.0,          # Scaling
-    position_bias_enabled=True,  # Lost-in-middle handling
+    position_bias_enabled=True,  # Lost-in-middle
     daa_enabled=True,         # Noise filtering
     sparse_enabled=True,      # Sparse MLP
     s2_attn_enabled=False,    # Long context (optional)
 )
-```
-
-## File Structure
-
-```
-hylorada/
-├── lora.py           # HyLoRADAUnified, PositionBias, UnifiedLayer
-├── daa.py            # PositionalDAA
-├── config.py         # HyLoRADAConfig
-├── model.py          # HyLoRADAModel wrapper
-├── sparse_mlp.py     # Sparse adapters
-├── s2_attention.py   # Shifted sparse attention
-├── baselines.py      # Comparison methods
-└── evaluation.py     # Metrics
 ```
 
 ## References
@@ -127,4 +97,3 @@ hylorada/
 1. Hu et al., "LoRA: Low-Rank Adaptation" (2021)
 2. Liu et al., "DoRA: Weight-Decomposed LoRA" (2024)
 3. Hayou et al., "LoRA+: Efficient Adaptation" (2024)
-4. Chen et al., "LongLoRA: Long-Context Fine-tuning" (2024)
