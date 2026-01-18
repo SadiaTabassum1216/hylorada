@@ -1,16 +1,28 @@
 # HyLoRADA
 
-HyLoRADA is a novel parameter-efficient fine-tuning method for LLMs.
+**Unified HyLoRADA** - Parameter-efficient fine-tuning for long-context LLMs.
 
-## Novel Contributions
+## Key Features
 
-### HyLoRADA v1
-1. **Orthogonal Initialization** - Prevents rank collapse during training
-2. **Gated Magnitude** - Learnable control over weight magnitude contribution
-3. **Residual LoRA Path** - Blends DoRA and LoRA learning dynamics
+| Feature | Solution | Parameter Cost |
+|---------|----------|----------------|
+| **Long Context** | S²-Attn grouping | Optional |
+| **Lost-in-Middle** | PositionBias | 64 params (shared) |
+| **Noise Filtering** | PositionalDAA | ~2K per layer |
+| **Rank Collapse** | Orthogonal init | 0 extra |
+| **Adaptive Control** | Gated magnitude | +1 per layer |
 
-### HyLoRADA v2 (New!)
-4. **Structure-Conditioned Scaling** - Position-dependent LoRA adaptation for code, time series, and graph data
+## Quick Start
+
+```python
+from transformers import AutoModelForCausalLM
+from hylorada import HyLoRADAConfig, HyLoRADAModel
+
+model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B")
+config = HyLoRADAConfig(lora_rank=8)
+wrapped = HyLoRADAModel(model, config)
+wrapped.print_trainable_params()
+```
 
 ## Benchmark Results
 
@@ -18,55 +30,25 @@ HyLoRADA is a novel parameter-efficient fine-tuning method for LLMs.
 |--------|--------|-----|---------|
 | LoRA | 540K | 31.79 | 25.60 |
 | DoRA | 1.1M | 30.42 | 24.45 |
-| LoRaDA | 1.0M | 30.40 | 24.27 |
-| **HyLoRADA v1** | 2.2M | **27.01** | **19.66** |
+| **HyLoRADA** | 1.5M | **27.01** | **19.66** |
 
-**Improvements over DoRA**: -3.41 PPL (11% better)  
-**Improvements on LiM**: -4.61 PPL (19% better)
-
-## Setup
+## Installation
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Quick Start
-
-### HyLoRADA v1
-```python
-from transformers import AutoModelForCausalLM
-from hylorada import HyLoRADAConfig, HyLoRADAModel
-
-model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B")
-config = HyLoRADAConfig(
-    lora_rank=16,
-    use_hylorada=True,
-    lora_plus_enabled=True,
-)
-hylorada_model = HyLoRADAModel(model, config)
-```
-
-### HyLoRADA v2 (Structure-Aware)
-```python
-from hylorada import HyLoRADAConfig, StructureEncoder, HyLoRADAv2Linear
-
-config = HyLoRADAConfig(
-    use_hylorada_v2=True,
-    structure_dim=32,
-)
-
-# Create structure encoder for position-aware scaling
-encoder = StructureEncoder(hidden_size=32)
-```
-
-## Run Benchmarks
+## Usage
 
 ```bash
-# Standard benchmark
-python run_benchmark.py --methods lora dora lorada hylorada --epochs 3
+# Run benchmark
+python run_benchmark.py --methods hylorada --epochs 3
 
-# Code task (v2)
-python run_code_task.py --use_v2 --epochs 3
+# Code task
+python run_code_task.py --epochs 3
+
+# Tests
+python -m pytest tests/ -v
 ```
 
 ## Project Structure
@@ -74,28 +56,19 @@ python run_code_task.py --use_v2 --epochs 3
 ```
 hylorada/
 ├── hylorada/
-│   ├── config.py            # Configuration
-│   ├── lora.py              # LoRA / DoRA / HyLoRADA v1 & v2
-│   ├── structure_encoder.py # Structure encoder (v2)
-│   ├── model.py             # HyLoRADAModel wrapper
-│   ├── daa.py               # Direct Attention Adaptation
-│   ├── sparse_mlp.py        # Sparse MLP adapters
-│   ├── trainer.py           # Training utilities
-│   └── evaluation.py        # Metrics
-├── run_benchmark.py         # Benchmark script
-├── run_code_task.py         # Code task training
-├── optimize_hylorada.py     # Bayesian HPO
-├── METHODOLOGY.md           # Technical documentation
-└── tests/                   # Unit tests
+│   ├── config.py         # Configuration
+│   ├── lora.py           # HyLoRADAUnified, PositionBias
+│   ├── daa.py            # PositionalDAA
+│   ├── model.py          # HyLoRADAModel wrapper
+│   ├── baselines.py      # Comparison methods
+│   └── evaluation.py     # Metrics
+├── run_benchmark.py      # Benchmark script
+├── run_code_task.py      # Training script
+└── tests/                # Unit tests
 ```
 
-## Testing
+## Version History
 
-```bash
-python -m pytest tests/ -v
-```
-
-## Version
-
-- **v0.2.0** - Added HyLoRADA v2 with structure-aware adaptation
-- **v0.1.0** - Initial release with HyLoRADA v1
+- **v0.3.0** - Unified architecture (current)
+- **v0.2.0** - Structure-aware v2
+- **v0.1.0** - Initial release

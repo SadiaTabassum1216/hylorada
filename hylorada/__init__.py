@@ -2,28 +2,47 @@
 # Efficient Long-Context Fine-Tuning Framework
 
 from hylorada.config import HyLoRADAConfig
+
+# Main API (unified - recommended)
 from hylorada.lora import (
-    LoRALinear, 
-    HyLoRADALinear, 
+    HyLoRADAUnified,
+    UnifiedLayer,
+    PositionBias,
+    apply_unified_to_model,
+)
+
+# Legacy & baselines (for comparison)
+from hylorada.lora import (
+    LoRALinear,
+    DoRALinear,
+    HyLoRADALinear,
     HyLoRADAv2Linear,
+    LoRALayer,
+    DoRALayer,
+    HyLoRADALayer,
     HyLoRADAv2Layer,
     apply_lora_to_model,
+    apply_dora_to_model,
+    apply_hylorada_adapter_to_model,
 )
-from hylorada.daa import DirectAttentionAdapter
+
+# Components
+from hylorada.daa import DirectAttentionAdapter, PositionalDAA
 from hylorada.sparse_mlp import SparseMLP, SparseAdapter
 from hylorada.s2_attention import ShiftedSparseAttention
-from hylorada.structure_encoder import (
-    StructureEncoder,
-    TemporalStructureEncoder,
-    create_structure_encoder,
-)
+
+# Model wrapper (uses unified internally)
 from hylorada.model import HyLoRADAModel, apply_hylorada
+
+# Evaluation
 from hylorada.evaluation import (
     evaluate_perplexity,
     evaluate_lost_in_the_middle,
     compare_models,
     run_full_evaluation,
 )
+
+# Baselines for comparison
 from hylorada.baselines import (
     StandardLoRA,
     LoRaDAModel,
@@ -33,28 +52,36 @@ from hylorada.baselines import (
     get_baseline_model,
 )
 
-__version__ = "0.2.0"  # Updated for v2
+__version__ = "0.3.0"  # Unified architecture
+
 __all__ = [
+    # Config
     "HyLoRADAConfig",
-    "LoRALinear",
-    "HyLoRADALinear",
-    "HyLoRADAv2Linear",
-    "HyLoRADAv2Layer",
-    "apply_lora_to_model",
+    # Main API (unified)
+    "HyLoRADAUnified",
+    "UnifiedLayer",
+    "PositionBias",
+    "apply_unified_to_model",
+    # Model wrapper
+    "HyLoRADAModel",
+    "apply_hylorada",
+    # Components
     "DirectAttentionAdapter",
+    "PositionalDAA",
     "SparseMLP",
     "SparseAdapter",
     "ShiftedSparseAttention",
-    "StructureEncoder",
-    "TemporalStructureEncoder",
-    "create_structure_encoder",
-    "HyLoRADAModel",
-    "apply_hylorada",
+    # Evaluation
     "evaluate_perplexity",
     "evaluate_lost_in_the_middle",
     "compare_models",
     "run_full_evaluation",
-    # Baselines for comparison
+    # Legacy (for comparison scripts)
+    "LoRALinear",
+    "DoRALinear",
+    "HyLoRADALinear",
+    "apply_lora_to_model",
+    # Baselines
     "StandardLoRA",
     "LoRaDAModel",
     "LongLoRAModel",

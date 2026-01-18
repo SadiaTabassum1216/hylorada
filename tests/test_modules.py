@@ -56,17 +56,17 @@ class TestConfig:
         config = HyLoRADAConfig()
         assert config.lora_rank == 8
         assert config.daa_enabled == True
-        assert config.daa_use_positional == True  # Now enabled by default
-        assert config.sparse_enabled == True  # Enabled by default for full HyLoRADA
+        assert config.position_bias_enabled == True  # Unified position bias
+        assert config.sparse_enabled == True  # Enabled by default
         assert config.s2_attn_enabled == False  # Disabled by default
-        # Large-Sparse strategy defaults
-        assert config.sparse_adapter_dim == 128
-        assert config.sparse_topk_ratio == 0.05
+        # New simplified defaults
+        assert config.sparse_adapter_dim == 64  # Smaller for efficiency
+        assert config.sparse_topk_ratio == 0.1
     
-    def test_budget_validation(self):
-        """Test that budget must sum to 1.0."""
-        with pytest.raises(ValueError, match="must sum to 1.0"):
-            HyLoRADAConfig(budget_lora=0.5, budget_daa=0.3, budget_sparse=0.3)
+    def test_invalid_rank(self):
+        """Test that rank must be >= 1."""
+        with pytest.raises(ValueError):
+            HyLoRADAConfig(lora_rank=0)
     
     def test_presets(self):
         """Test preset configurations."""
@@ -135,6 +135,73 @@ class TestLoRA:
         # Won't find any q_proj/v_proj but should not error
         model, lora_layers = apply_lora_to_model(model, target_modules=("0", "2"))
         assert len(lora_layers) >= 0
+
+
+# ==================== Unified HyLoRADA Tests ====================
+
+from hylorada.lora import HyLoRADAUnified, UnifiedLayer, PositionBias, apply_unified_to_model
+
+
+class TestUnifiedHyLoRADA:
+    """Tests for the new unified HyLoRADA implementation."""
+    
+    def test_position_bias_shape(self):
+        """Test PositionBias outputs correct shape."""
+        pos_bias = PositionBias(num_buckets=64)
+        positions = torch.arange(128).unsqueeze(0).expand(2, -1)  # [2, 128]
+        
+        output = pos_bias(positions)
+        assert output.shape == (2, 128)
+    
+    def test_unified_linear_param_count(self, hidden_size):
+        """Test HyLoRADAUnified has expected number of parameters."""
+        rank = 8
+        adapter = HyLoRADAUnified(hidden_size, hidden_size, rank=rank)
+        
+        # Expected: lora_A (r*in) + lora_B (out*r) + magnitude (out) + 3 scalars
+        expected = rank * hidden_size + hidden_size * rank + hidden_size + 3
+        actual = sum(p.numel() for p in adapter.parameters())
+        
+        assert actual == expected
+    
+    def test_unified_layer_forward(self, sample_input, hidden_size):
+        """Test UnifiedLayer forward pass."""
+        base_layer = nn.Linear(hidden_size, hidden_size)
+        unified = UnifiedLayer(base_layer, rank=8)
+        
+        output = unified(sample_input)
+        assert output.shape == sample_input.shape
+    
+    def test_unified_with_positions(self, sample_input, hidden_size, seq_len, batch_size):
+        """Test UnifiedLayer with position input."""
+        pos_bias = PositionBias()
+        base_layer = nn.Linear(hidden_size, hidden_size)
+        unified = UnifiedLayer(base_layer, rank=8, position_bias=pos_bias)
+        
+        positions = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
+        output = unified(sample_input, positions=positions)
+        
+        assert output.shape == sample_input.shape
+    
+    def test_apply_unified_to_model(self, hidden_size):
+        """Test applying unified HyLoRADA to a model."""
+        class SimpleModel(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.q_proj = nn.Linear(hidden_size, hidden_size)
+                self.v_proj = nn.Linear(hidden_size, hidden_size)
+            
+            def forward(self, x):
+                return self.q_proj(x) + self.v_proj(x)
+        
+        model = SimpleModel()
+        model, layers, pos_bias = apply_unified_to_model(
+            model, target_modules=("q_proj", "v_proj"), rank=4
+        )
+        
+        assert len(layers) == 2
+        assert pos_bias is not None
+        assert sum(p.numel() for p in pos_bias.parameters()) == 64
 
 
 # ==================== DAA Tests ====================

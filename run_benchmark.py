@@ -198,49 +198,46 @@ def main():
                 train_time = train_model(model, tokenizer, train_texts, args, "LoRA")
             
             elif method == "dora":
-                # DoRA: Weight-Decomposed LoRA
-                config = HyLoRADAConfig(
-                    lora_rank=args.lora_rank,
-                    lora_alpha=args.lora_rank * 2,
-                    use_dora=True,
-                    daa_enabled=False,
-                    sparse_enabled=False,
-                    budget_lora=1.0,
-                    budget_daa=0.0,
-                    budget_sparse=0.0,
+                # DoRA: Using baseline LoRA with DoRA-style training
+                # (DoRA is now a baseline, not in unified path)
+                from hylorada.lora import apply_dora_to_model
+                apply_dora_to_model(
+                    base_model,
+                    target_modules=("q_proj", "k_proj", "v_proj", "o_proj"),
+                    rank=args.lora_rank,
+                    alpha=args.lora_rank * 2,
                 )
-                model = HyLoRADAModel(base_model, config)
-                model.print_trainable_params()
-                params = model.count_params()["trainable_params"]
+                # Freeze base and count params
+                for p in base_model.parameters():
+                    if not any(n in ["lora", "dora"] for n in []):
+                        p.requires_grad = False
+                params = sum(p.numel() for p in base_model.parameters() if p.requires_grad)
+                model = base_model
                 train_time = train_model(model, tokenizer, train_texts, args, "DoRA")
             
             elif method == "hylorada":
-                # HyLoRADA: Novel method with OPTIMIZED hyperparameters
+                # HyLoRADA Unified: All features in one
                 # - Orthogonal init (prevents rank collapse)
                 # - Gated magnitude (learnable magnitude control)
                 # - Residual LoRA path (blends DoRA + LoRA dynamics)
-                # - LoRA+ (asymmetric learning rates)
+                # - Position-aware scaling (handles lost-in-middle)
                 config = HyLoRADAConfig(
-                    lora_rank=16,  # Optimized (was 8)
-                    lora_alpha=47.2,  # Optimized: rank * 2.95
-                    lora_dropout=0.01,  # Optimized (was 0.05)
-                    use_hylorada=True,
+                    lora_rank=16,  # Optimized
+                    lora_alpha=47.2,  # Optimized: rank * ~3
+                    lora_dropout=0.01,
                     lora_plus_enabled=True,
-                    lora_plus_ratio=17.1,  # Optimized (was 10)
-                    daa_enabled=False,
+                    lora_plus_ratio=17.1,
+                    daa_enabled=False,  # DAA separate for benchmark
                     sparse_enabled=False,
-                    budget_lora=1.0,
-                    budget_daa=0.0,
-                    budget_sparse=0.0,
                 )
                 model = HyLoRADAModel(base_model, config)
                 
                 # Apply optimized gate/residual initialization
                 for module in model.modules():
                     if hasattr(module, 'magnitude_gate'):
-                        module.magnitude_gate.data.fill_(0.37)  # Optimized (sigmoid ≈ 0.59)
+                        module.magnitude_gate.data.fill_(0.37)
                     if hasattr(module, 'residual_weight'):
-                        module.residual_weight.data.fill_(0.22)  # Optimized (sigmoid ≈ 0.55)
+                        module.residual_weight.data.fill_(0.22)
                 
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]

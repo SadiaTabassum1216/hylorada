@@ -16,12 +16,13 @@ from dataclasses import dataclass
 
 from .config import HyLoRADAConfig
 from .lora import (
-    LoRALayer, DoRALayer, HyLoRADALayer,
-    apply_lora_to_model, apply_lora_with_layer_ranks, apply_dora_to_model,
-    apply_hylorada_adapter_to_model,
+    UnifiedLayer, PositionBias, HyLoRADAUnified,
+    apply_unified_to_model,
     count_lora_params, merge_lora_weights, get_lora_plus_param_groups,
+    # Legacy imports for baselines
+    apply_lora_to_model, apply_dora_to_model, apply_hylorada_adapter_to_model,
 )
-from .daa import DirectAttentionAdapter, PositionalDAA, ContentAwareDAA, apply_daa_to_attention, count_daa_params
+from .daa import DirectAttentionAdapter, PositionalDAA, count_daa_params
 from .sparse_mlp import SparseMLP, SparseAdapter, apply_sparse_to_ffn, count_sparse_params
 from .s2_attention import ShiftedSparseAttention, apply_s2_attention, get_s2_memory_estimate
 
@@ -29,9 +30,10 @@ from .s2_attention import ShiftedSparseAttention, apply_s2_attention, get_s2_mem
 @dataclass
 class HyLoRADAState:
     """Tracks the state of HyLoRADA components in a model."""
-    lora_layers: Dict[str, LoRALayer]
+    lora_layers: Dict[str, UnifiedLayer]
     daa_adapters: Dict[str, DirectAttentionAdapter]
     sparse_modules: Dict[str, SparseMLP]
+    position_bias: Optional[PositionBias]
     s2_wrappers: List[Any]
     config: HyLoRADAConfig
 
@@ -79,6 +81,7 @@ class HyLoRADAModel(nn.Module):
             lora_layers={},
             daa_adapters={},
             sparse_modules={},
+            position_bias=None,
             s2_wrappers=[],
             config=self.config,
         )
@@ -113,44 +116,15 @@ class HyLoRADAModel(nn.Module):
     
     def _apply_hylorada(self):
         """Apply all HyLoRADA components to the model."""
-        # 1. Apply LoRA/DoRA/HyLoRADA adapters
-        if self.config.use_hylorada:
-            # Use HyLoRADA (our novel method)
-            self.base_model, self.state.lora_layers = apply_hylorada_adapter_to_model(
-                model=self.base_model,
-                target_modules=self.config.lora_target_modules,
-                rank=self.config.lora_rank,
-                alpha=self.config.lora_alpha,
-                dropout=self.config.lora_dropout,
-            )
-        elif self.config.use_dora:
-            # Use DoRA (Weight-Decomposed LoRA)
-            self.base_model, self.state.lora_layers = apply_dora_to_model(
-                model=self.base_model,
-                target_modules=self.config.lora_target_modules,
-                rank=self.config.lora_rank,
-                alpha=self.config.lora_alpha,
-                dropout=self.config.lora_dropout,
-            )
-        elif self.config.lora_layerwise_rank:
-            # Use layer-wise LoRA rank
-            self.base_model, self.state.lora_layers = apply_lora_with_layer_ranks(
-                model=self.base_model,
-                target_modules=self.config.lora_target_modules,
-                base_rank=self.config.lora_rank,
-                alpha_ratio=self.config.lora_alpha / self.config.lora_rank,
-                dropout=self.config.lora_dropout,
-                rank_strategy=self.config.lora_rank_strategy,
-            )
-        else:
-            # Standard LoRA
-            self.base_model, self.state.lora_layers = apply_lora_to_model(
-                model=self.base_model,
-                target_modules=self.config.lora_target_modules,
-                rank=self.config.lora_rank,
-                alpha=self.config.lora_alpha,
-                dropout=self.config.lora_dropout,
-            )
+        # 1. Apply unified HyLoRADA adapters with shared position bias
+        self.base_model, self.state.lora_layers, self.state.position_bias = apply_unified_to_model(
+            model=self.base_model,
+            target_modules=self.config.lora_target_modules,
+            rank=self.config.lora_rank,
+            alpha=self.config.lora_alpha,
+            dropout=self.config.lora_dropout,
+            use_position_bias=self.config.position_bias_enabled,
+        )
         
         # 2. Apply DAA if enabled
         if self.config.daa_enabled:
@@ -181,47 +155,25 @@ class HyLoRADAModel(nn.Module):
             self._connect_daa_to_s2()
     
     def _apply_daa(self):
-        """Apply Direct Attention Adaptation to attention layers.
-        
-        Supports three modes:
-        1. ContentAwareDAA: Input-dependent α, β (best accuracy)
-        2. PositionalDAA: Position-aware biases (good for long context)
-        3. DirectAttentionAdapter: Static per-head α, β (simplest)
-        """
+        """Apply PositionalDAA to attention layers for noise filtering."""
         layer_idx = 0
         
         for name, module in self.base_model.named_modules():
             if self.attn_pattern in name.lower():
-                # Check if this is an attention layer (has projections)
-                # Support LLaMA-style (q_proj, v_proj), GPT-2 (c_attn), and other patterns
+                # Check if this is an attention layer
                 has_proj = any(
                     hasattr(module, attr) for attr in 
                     ["q_proj", "k_proj", "v_proj", "query", "key", "value", "c_attn", "c_proj"]
                 )
                 
                 if has_proj:
-                    # Priority: ContentAwareDAA > PositionalDAA > DirectAttentionAdapter
-                    if self.config.daa_content_aware:
-                        daa = ContentAwareDAA(
-                            hidden_size=self.hidden_size,
-                            num_heads=self.num_heads,
-                            init_alpha=self.config.daa_init_alpha,
-                            init_beta=self.config.daa_init_beta,
-                        )
-                    elif self.config.daa_use_positional:
-                        daa = PositionalDAA(
-                            num_heads=self.num_heads,
-                            max_seq_len=self.config.max_sequence_length,
-                            num_buckets=self.config.daa_num_buckets,
-                            per_head=self.config.daa_per_head,
-                        )
-                    else:
-                        daa = DirectAttentionAdapter(
-                            num_heads=self.num_heads,
-                            per_head=self.config.daa_per_head,
-                            init_alpha=self.config.daa_init_alpha,
-                            init_beta=self.config.daa_init_beta,
-                        )
+                    # Use PositionalDAA for lost-in-middle handling
+                    daa = PositionalDAA(
+                        num_heads=self.num_heads,
+                        max_seq_len=self.config.max_sequence_length,
+                        num_buckets=self.config.daa_num_buckets,
+                        per_head=self.config.daa_per_head,
+                    )
                     module.daa_adapter = daa
                     self.state.daa_adapters[name] = daa
                     layer_idx += 1
@@ -256,11 +208,10 @@ class HyLoRADAModel(nn.Module):
                 for param in sparse_mod.sparse_adapter.parameters():
                     param.requires_grad = True
         
-        # Optionally unfreeze layer norms (LongLoRA finding: norms matter)
-        if self.config.trainable_norms:
-            for name, param in self.base_model.named_parameters():
-                if "norm" in name.lower() or "ln" in name.lower():
-                    param.requires_grad = True
+        # Unfreeze position bias if present
+        if self.state.position_bias is not None:
+            for param in self.state.position_bias.parameters():
+                param.requires_grad = True
     
     def forward(self, *args, **kwargs):
         """Forward pass through the wrapped model."""

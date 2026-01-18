@@ -19,7 +19,7 @@ from tqdm import tqdm
 import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from hylorada import HyLoRADAConfig, HyLoRADAModel, StructureEncoder
+from hylorada import HyLoRADAConfig, HyLoRADAModel
 from hylorada.trainer import HyLoRADATrainer, TrainingConfig
 
 
@@ -127,11 +127,10 @@ def train_hylorada_v2_code(args):
     """Train HyLoRADA v2 on code task."""
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"\n{'='*60}")
-    print("HyLoRADA v2 Code Task Training")
+    print("HyLoRADA Unified Code Task Training")
     print(f"{'='*60}")
     print(f"Model: {args.model}")
     print(f"Device: {device}")
-    print(f"V2 Mode: {args.use_v2}")
     print(f"{'='*60}\n")
     
     # Load tokenizer and model
@@ -154,14 +153,11 @@ def train_hylorada_v2_code(args):
         num_test=args.num_test,
     )
     
-    # Configure HyLoRADA
-    print("\n[2] Applying HyLoRADA...")
+    # Configure HyLoRADA (unified - always uses best features)
+    print("\n[2] Applying HyLoRADA (unified)...")
     config = HyLoRADAConfig(
         lora_rank=args.rank,
         lora_alpha=args.rank * 2,
-        use_hylorada=not args.use_v2,  # v1 if not v2
-        use_hylorada_v2=args.use_v2,
-        structure_dim=32,
         lora_plus_enabled=True,
         lora_plus_ratio=10.0,
         daa_enabled=True,
@@ -258,7 +254,6 @@ if __name__ == "__main__":
     parser.add_argument("--num_train", type=int, default=500)
     parser.add_argument("--num_test", type=int, default=50)
     parser.add_argument("--grad_accum", type=int, default=4)
-    parser.add_argument("--use_v2", action="store_true", help="Use HyLoRADA v2")
     parser.add_argument("--save_dir", type=str, default="./results_code")
     
     args = parser.parse_args()

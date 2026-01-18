@@ -808,6 +808,359 @@ class HyLoRADAv2Layer(nn.Module):
         return self._base_weight + self.hylorada_v2.get_delta_weight()
 
 
+# =============================================================================
+# UNIFIED HYLORADA - Consolidated implementation (recommended)
+# =============================================================================
+
+class PositionBias(nn.Module):
+    """
+    Shared position bias table for all layers.
+    
+    Ultra-lightweight module (only 64 params!) that provides position-aware
+    scaling to address the lost-in-the-middle problem.
+    
+    Uses logarithmic bucketing so distant positions share buckets,
+    while nearby positions have fine-grained distinction.
+    """
+    
+    def __init__(self, num_buckets: int = 64, max_distance: int = 32768):
+        super().__init__()
+        self.num_buckets = num_buckets
+        self.max_distance = max_distance
+        
+        # Learnable bias per bucket - initialized to zero (neutral)
+        self.bias = nn.Parameter(torch.zeros(num_buckets))
+    
+    def _position_to_bucket(self, positions: torch.Tensor) -> torch.Tensor:
+        """
+        Convert absolute positions to bucket indices using log bucketing.
+        
+        First half of buckets are for exact positions (0, 1, 2, ...)
+        Second half use logarithmic spacing for distant positions.
+        """
+        # Clamp to valid range
+        positions = positions.clamp(0, self.max_distance - 1)
+        
+        # First half: exact positions
+        exact_buckets = self.num_buckets // 2
+        
+        # For positions < exact_buckets, use exact bucket
+        is_small = positions < exact_buckets
+        
+        # For larger positions, use log bucketing
+        # Map [exact_buckets, max_distance] -> [exact_buckets, num_buckets]
+        relative_position = positions.float() - exact_buckets
+        max_relative = self.max_distance - exact_buckets
+        
+        # Log scale: bucket = exact_buckets + (num_buckets/2) * log(pos) / log(max)
+        log_buckets = exact_buckets + (
+            (self.num_buckets - exact_buckets - 1) * 
+            torch.log(relative_position.clamp(min=1)) / 
+            math.log(max(max_relative, 2))
+        )
+        
+        bucket_ids = torch.where(is_small, positions, log_buckets.long())
+        return bucket_ids.clamp(0, self.num_buckets - 1)
+    
+    def forward(self, positions: torch.Tensor) -> torch.Tensor:
+        """
+        Get position bias values.
+        
+        Args:
+            positions: [batch, seq] absolute positions (0 to seq_len-1)
+            
+        Returns:
+            bias: [batch, seq] position-dependent bias values
+        """
+        bucket_ids = self._position_to_bucket(positions)
+        return self.bias[bucket_ids]
+
+
+class HyLoRADAUnified(nn.Module):
+    """
+    Unified HyLoRADA: Single class with all features consolidated.
+    
+    Combines:
+    - Orthogonal initialization (prevents rank collapse)
+    - Gated magnitude (adaptive DoRA control)
+    - Residual LoRA+DoRA blend (best of both)
+    - Position-scaled adaptation (handles lost-in-middle)
+    
+    Parameter count per layer: r*(d_in + d_out) + d_out + 3
+    - lora_A: r * d_in
+    - lora_B: d_out * r
+    - magnitude: d_out
+    - magnitude_gate: 1
+    - residual_weight: 1
+    - position_scale: 1
+    
+    Plus 64 shared params (PositionBias) for the whole model.
+    
+    Args:
+        in_features: Input dimension
+        out_features: Output dimension
+        rank: Rank of the low-rank decomposition
+        alpha: Scaling factor
+        dropout: Dropout probability
+        position_bias: Optional shared PositionBias module
+    """
+    
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        rank: int = 8,
+        alpha: float = 16.0,
+        dropout: float = 0.0,
+        position_bias: Optional['PositionBias'] = None,
+    ):
+        super().__init__()
+        
+        self.in_features = in_features
+        self.out_features = out_features
+        self.rank = rank
+        self.alpha = alpha
+        self.scaling = alpha / rank
+        
+        # LoRA matrices with ORTHOGONAL initialization for A
+        self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
+        self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
+        
+        # Learnable magnitude vector (from DoRA)
+        self.magnitude = nn.Parameter(torch.ones(out_features))
+        
+        # GATED magnitude control - starts at 0.5
+        self.magnitude_gate = nn.Parameter(torch.tensor(0.0))
+        
+        # RESIDUAL blend between DoRA and LoRA
+        self.residual_weight = nn.Parameter(torch.tensor(0.1))
+        
+        # Position-dependent scaling factor (lightweight v2 feature)
+        self.position_scale = nn.Parameter(torch.tensor(0.0))
+        
+        # Shared position bias (passed in, not owned)
+        self.position_bias = position_bias
+        
+        # Dropout
+        self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
+        
+        # Cache for base weight norm
+        self.register_buffer("base_weight_norm", None)
+        
+        # Initialize
+        self.reset_parameters()
+    
+    def reset_parameters(self):
+        """Initialize with orthogonal A matrix (prevents rank collapse)."""
+        nn.init.orthogonal_(self.lora_A)
+        nn.init.zeros_(self.lora_B)
+    
+    def init_magnitude(self, base_weight: torch.Tensor):
+        """Initialize magnitude from base weight norms."""
+        weight_norm = base_weight.norm(p=2, dim=1)
+        self.magnitude.data = weight_norm.clone()
+        self.register_buffer("base_weight_norm", weight_norm.clone())
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        base_output: torch.Tensor,
+        base_weight: torch.Tensor,
+        positions: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Apply unified HyLoRADA adaptation.
+        
+        Args:
+            x: Input tensor [batch, seq, in_features]
+            base_output: Output from frozen base layer
+            base_weight: The frozen base weight matrix
+            positions: Optional [batch, seq] position indices for scaling
+            
+        Returns:
+            Adapted output
+        """
+        input_dtype = x.dtype
+        x_float = x.to(self.lora_A.dtype)
+        
+        # Compute LoRA contribution
+        lora_x = self.dropout(x_float)
+        lora_x = F.linear(lora_x, self.lora_A)  # [batch, seq, rank]
+        lora_out = F.linear(lora_x, self.lora_B)  # [batch, seq, out_features]
+        delta_v = lora_out * self.scaling
+        
+        # === Position-scaled adaptation (lightweight v2 feature) ===
+        if positions is not None and self.position_bias is not None:
+            # Get position bias: [batch, seq]
+            pos_bias = self.position_bias(positions)
+            # Scale based on learned position_scale parameter
+            # sigmoid(position_scale) controls influence: 0.5 at init
+            scale_weight = torch.sigmoid(self.position_scale)
+            # Position scaling in range [1-0.5*w, 1+0.5*w] based on bias
+            pos_scale = 1.0 + scale_weight * torch.tanh(pos_bias).unsqueeze(-1)
+            delta_v = delta_v * pos_scale
+        
+        # === DoRA PATH ===
+        updated_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling
+        updated_norm = updated_weight.norm(p=2, dim=1) + 1e-8
+        
+        # Apply gated magnitude
+        gate = torch.sigmoid(self.magnitude_gate)
+        effective_magnitude = self.magnitude * gate + self.base_weight_norm * (1 - gate)
+        
+        mag_scale = effective_magnitude / updated_norm
+        dora_output = (base_output.to(self.lora_A.dtype) + delta_v) * mag_scale.unsqueeze(0).unsqueeze(0)
+        
+        # === RESIDUAL LoRA PATH ===
+        lora_output = base_output.to(self.lora_A.dtype) + delta_v
+        
+        # Blend DoRA and LoRA with learnable weight
+        residual_w = torch.sigmoid(self.residual_weight)
+        final_output = (1 - residual_w) * dora_output + residual_w * lora_output
+        
+        return final_output.to(input_dtype)
+    
+    def get_delta_weight(self) -> torch.Tensor:
+        """Compute the LoRA weight delta."""
+        return (self.lora_B @ self.lora_A) * self.scaling
+    
+    def extra_repr(self) -> str:
+        has_pos = self.position_bias is not None
+        return (
+            f"in_features={self.in_features}, out_features={self.out_features}, "
+            f"rank={self.rank}, alpha={self.alpha}, position_aware={has_pos}"
+        )
+
+
+class UnifiedLayer(nn.Module):
+    """
+    Unified HyLoRADA wrapper for model injection.
+    
+    This is the recommended wrapper for applying HyLoRADA to models.
+    Combines all features into a single, efficient layer.
+    """
+    
+    def __init__(
+        self,
+        base_layer: nn.Module,
+        rank: int = 8,
+        alpha: float = 16.0,
+        dropout: float = 0.0,
+        position_bias: Optional[PositionBias] = None,
+    ):
+        super().__init__()
+        
+        self.base_layer = base_layer
+        
+        # Handle both nn.Linear and Conv1D (GPT-2)
+        if hasattr(base_layer, 'nf'):  # Conv1D from transformers
+            in_features = base_layer.weight.shape[0]
+            out_features = base_layer.nf
+            self.is_conv1d = True
+            self._base_weight = base_layer.weight.T
+        else:  # nn.Linear
+            in_features = base_layer.in_features
+            out_features = base_layer.out_features
+            self.is_conv1d = False
+            self._base_weight = base_layer.weight
+        
+        self.adapter = HyLoRADAUnified(
+            in_features=in_features,
+            out_features=out_features,
+            rank=rank,
+            alpha=alpha,
+            dropout=dropout,
+            position_bias=position_bias,
+        )
+        
+        # Initialize magnitude from base weights
+        with torch.no_grad():
+            self.adapter.init_magnitude(self._base_weight.data.float())
+        
+        # Freeze base layer
+        for param in self.base_layer.parameters():
+            param.requires_grad = False
+    
+    @property
+    def lora(self):
+        """Compatibility property - returns the adapter module."""
+        return self.adapter
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        positions: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Forward pass through frozen base + unified adapter.
+        
+        Args:
+            x: Input tensor [batch, seq, in_features]
+            positions: Optional [batch, seq] position indices
+            
+        Returns:
+            Adapted output
+        """
+        base_out = self.base_layer(x)
+        return self.adapter(x, base_out, self._base_weight, positions)
+    
+    @property
+    def weight(self) -> torch.Tensor:
+        """Return effective weight for compatibility."""
+        return self._base_weight + self.adapter.get_delta_weight()
+
+
+def apply_unified_to_model(
+    model: nn.Module,
+    target_modules: Tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj"),
+    rank: int = 8,
+    alpha: float = 16.0,
+    dropout: float = 0.0,
+    use_position_bias: bool = True,
+) -> Tuple[nn.Module, Dict[str, UnifiedLayer], Optional[PositionBias]]:
+    """
+    Apply unified HyLoRADA adapters to target modules.
+    
+    This is the recommended function for applying HyLoRADA to models.
+    Creates a shared PositionBias for all layers (only 64 params!).
+    
+    Args:
+        model: The model to modify (will be modified in-place)
+        target_modules: Names of modules to apply HyLoRADA to
+        rank: LoRA rank
+        alpha: Scaling factor
+        dropout: Dropout probability
+        use_position_bias: Whether to use position-aware scaling
+        
+    Returns:
+        Tuple of (modified model, dict of unified layers, shared position bias)
+    """
+    # Create shared position bias (only 64 params total!)
+    position_bias = PositionBias() if use_position_bias else None
+    
+    unified_layers = {}
+    targets = find_target_modules(model, target_modules)
+    
+    for name, module in targets.items():
+        # Create unified wrapper
+        unified_layer = UnifiedLayer(
+            base_layer=module,
+            rank=rank,
+            alpha=alpha,
+            dropout=dropout,
+            position_bias=position_bias,
+        )
+        
+        # Replace module in parent
+        parent_name, child_name = name.rsplit(".", 1) if "." in name else ("", name)
+        parent = model.get_submodule(parent_name) if parent_name else model
+        setattr(parent, child_name, unified_layer)
+        
+        unified_layers[name] = unified_layer
+    
+    return model, unified_layers, position_bias
+
+
 def _is_linear_layer(module: nn.Module) -> bool:
     """Check if module is a linear-like layer (nn.Linear or Conv1D)."""
     if isinstance(module, nn.Linear):
