@@ -105,23 +105,18 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
             return load_dataset_by_name("wikitext", num_train, num_test, max_length)
             
     elif dataset_name == "longbench":
-        # Use scrolls (available, long context) since THUDM/LongBench has script issues
+        # Use wikitext-103 (long articles, no deprecated scripts)
         try:
-            dataset = load_dataset("tau/scrolls", "qasper", split="train")
-            texts = []
-            for sample in dataset:
-                # Combine input for long context
-                text = sample.get("input", "")
-                if len(text) > 500:
-                    texts.append(text[:max_length * 4])
-            while len(texts) < num_train + num_test:
-                texts = texts + texts
+            dataset = load_dataset("wikitext", "wikitext-103-raw-v1")
+            texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 2000]
+            print(f"    Found {len(texts)} long articles (>2000 chars)")
             train_texts = texts[:num_train]
             test_texts = texts[num_train:num_train + num_test]
-            print(f"    Dataset: scrolls/qasper (long context QA)")
+            print(f"    Dataset: WikiText-103 (long context)")
         except Exception as e:
-            print(f"    Warning: scrolls failed ({e}), using wikitext")
+            print(f"    Warning: WikiText-103 failed ({e})")
             return load_dataset_by_name("wikitext", num_train, num_test, max_length)
+
             
     elif dataset_name == "pg19":
         # PG19 - books (very long context)
