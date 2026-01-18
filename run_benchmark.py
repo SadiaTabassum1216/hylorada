@@ -105,21 +105,22 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
             return load_dataset_by_name("wikitext", num_train, num_test, max_length)
             
     elif dataset_name == "longbench":
-        # LongBench - multi-task long context benchmark
+        # Use scrolls (available, long context) since THUDM/LongBench has script issues
         try:
-            dataset = load_dataset("THUDM/LongBench", "qasper", split="test")
+            dataset = load_dataset("tau/scrolls", "qasper", split="train")
             texts = []
             for sample in dataset:
-                context = sample.get("context", "")
-                if len(context) > 500:  # Only long samples
-                    texts.append(context[:max_length * 4])  # Truncate very long
+                # Combine input for long context
+                text = sample.get("input", "")
+                if len(text) > 500:
+                    texts.append(text[:max_length * 4])
             while len(texts) < num_train + num_test:
                 texts = texts + texts
             train_texts = texts[:num_train]
             test_texts = texts[num_train:num_train + num_test]
-            print(f"    Dataset: LongBench/qasper (4K-8K context)")
+            print(f"    Dataset: scrolls/qasper (long context QA)")
         except Exception as e:
-            print(f"    Warning: LongBench failed ({e}), using wikitext")
+            print(f"    Warning: scrolls failed ({e}), using wikitext")
             return load_dataset_by_name("wikitext", num_train, num_test, max_length)
             
     elif dataset_name == "pg19":
@@ -254,11 +255,10 @@ def main():
             
             elif method == "hylorada":
                 # HyLoRADA Unified: All features in one
-                # - Orthogonal init (prevents rank collapse)
-                # - Gated magnitude (learnable magnitude control)
-                # - Residual LoRA path (blends DoRA + LoRA dynamics)
-                # - Position-aware scaling (handles lost-in-middle)
-                # - S²-Attn for long context (optional)
+                # Note: S²-Attn disabled for GQA models (Qwen, LLaMA 3) - causes shape errors
+                if args.s2_attn:
+                    print("    Warning: S²-Attn may not work with GQA models (Qwen, LLaMA 3)")
+                
                 config = HyLoRADAConfig(
                     lora_rank=args.lora_rank,
                     lora_alpha=args.lora_rank * 3,
@@ -267,11 +267,15 @@ def main():
                     lora_plus_ratio=17.1,
                     daa_enabled=True,
                     sparse_enabled=False,
-                    s2_attn_enabled=args.s2_attn,
-                    s2_group_size=2048,
+                    s2_attn_enabled=False,  # Disabled: GQA incompatible
+                    gradient_checkpointing=True,  # Save memory
                     max_sequence_length=args.max_length,
                 )
                 model = HyLoRADAModel(base_model, config)
+                
+                # Enable gradient checkpointing for OOM prevention
+                if hasattr(base_model, 'gradient_checkpointing_enable'):
+                    base_model.gradient_checkpointing_enable()
                 
                 # Apply optimized gate/residual initialization
                 for module in model.modules():
