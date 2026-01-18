@@ -255,10 +255,6 @@ def main():
             
             elif method == "hylorada":
                 # HyLoRADA Unified: All features in one
-                # Note: S²-Attn disabled for GQA models (Qwen, LLaMA 3) - causes shape errors
-                if args.s2_attn:
-                    print("    Warning: S²-Attn may not work with GQA models (Qwen, LLaMA 3)")
-                
                 config = HyLoRADAConfig(
                     lora_rank=args.lora_rank,
                     lora_alpha=args.lora_rank * 3,
@@ -268,14 +264,9 @@ def main():
                     daa_enabled=True,
                     sparse_enabled=False,
                     s2_attn_enabled=False,  # Disabled: GQA incompatible
-                    gradient_checkpointing=True,  # Save memory
                     max_sequence_length=args.max_length,
                 )
                 model = HyLoRADAModel(base_model, config)
-                
-                # Enable gradient checkpointing for OOM prevention
-                if hasattr(base_model, 'gradient_checkpointing_enable'):
-                    base_model.gradient_checkpointing_enable()
                 
                 # Apply optimized gate/residual initialization
                 for module in model.modules():
