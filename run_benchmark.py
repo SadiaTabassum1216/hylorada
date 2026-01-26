@@ -87,26 +87,25 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
     """
     if dataset_name == "wikitext":
         try:
-            # Try raw version first
+            # Try wikitext-2-raw (standard)
             dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
         except Exception as e:
-            print(f"    Warning: wikitext-2-raw-v1 failed ({e}), trying wikitext-2-v1...")
+            print(f"    Warning: wikitext-2-raw-v1 failed ({e}), trying wikitext-103-raw-v1...")
             try:
-                # Try processed version
-                dataset = load_dataset("wikitext", "wikitext-2-v1")
+                # Try larger wikitext-103
+                dataset = load_dataset("wikitext", "wikitext-103-raw-v1")
             except Exception as e2:
-                print(f"    Warning: wikitext-2-v1 failed ({e2}), utilizing dummy dataset...")
-                # Fallback to dummy data
-                from datasets import Dataset
-                dummy_text = "This is a dummy sentence for benchmarking purposes. " * 100
-                dataset = {
-                    "train": Dataset.from_dict({"text": [dummy_text] * 500}),
-                    "test": Dataset.from_dict({"text": [dummy_text] * 100})
-                }
+                print(f"    Warning: wikitext-103 failed ({e2}), trying ptb_text_only...")
+                try: 
+                    # Try Penn Treebank
+                    dataset = load_dataset("ptb_text_only", "penn_treebank")
+                except Exception as e3:
+                    print(f"    Error: All text datasets failed. Please check internet connection.")
+                    raise e3
         
         train_texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 50][:num_train]
         test_texts = [t for t in dataset["test"]["text"] if len(t.strip()) > 50][:num_test]
-        print(f"    Dataset: WikiText-2 (short context)")
+        print(f"    Dataset: Standard Language Modeling (WikiText/PTB)")
         
     elif dataset_name == "code":
         try:
@@ -152,6 +151,35 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
         except Exception as e:
             print(f"    Warning: PG19 failed ({e}), using wikitext")
             return load_dataset_by_name("wikitext", num_train, num_test, max_length)
+    elif dataset_name == "c4":
+        # C4 - RealNewsLike (streaming, huge)
+        try:
+            dataset = load_dataset("c4", "realnewslike", split="train", streaming=True)
+            texts = []
+            for i, sample in enumerate(dataset):
+                if i >= num_train + num_test:
+                    break
+                text = sample.get("text", "")
+                if len(text) > 500:
+                    texts.append(text)
+            train_texts = texts[:num_train]
+            test_texts = texts[num_train:num_train + num_test]
+            print(f"    Dataset: C4 RealNewsLike (streaming)")
+        except Exception as e:
+            print(f"    Warning: C4 failed ({e}), using wikitext")
+            return load_dataset_by_name("wikitext", num_train, num_test, max_length)
+
+    elif dataset_name == "ptb":
+        # Penn Treebank
+        try:
+            dataset = load_dataset("ptb_text_only", "penn_treebank")
+            train_texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 50][:num_train]
+            test_texts = [t for t in dataset["test"]["text"] if len(t.strip()) > 50][:num_test]
+            print(f"    Dataset: Penn Treebank")
+        except Exception as e:
+            print(f"    Warning: PTB failed ({e}), using wikitext")
+            return load_dataset_by_name("wikitext", num_train, num_test, max_length)
+
     else:
         raise ValueError(f"Unknown dataset: {dataset_name}")
     
@@ -171,8 +199,8 @@ def main():
     parser.add_argument("--lora_rank", type=int, default=8)
     parser.add_argument("--output_dir", type=str, default="./benchmark_results")
     parser.add_argument("--dataset", type=str, default="wikitext",
-                        choices=["wikitext", "code", "longbench", "pg19"],
-                        help="Dataset: wikitext, code, longbench (long context), pg19 (books)")
+                        choices=["wikitext", "code", "longbench", "pg19", "c4", "ptb"],
+                        help="Dataset: wikitext, code, longbench, pg19, c4, ptb")
     parser.add_argument("--methods", nargs="+", 
                         default=["baseline", "lora", "lorada", "longlora", "sparse", "hylorada"])
     parser.add_argument("--sparse_dim", type=int, default=128,
