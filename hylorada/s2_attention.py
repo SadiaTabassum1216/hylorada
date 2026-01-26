@@ -43,6 +43,7 @@ class ShiftedSparseAttention(nn.Module):
         num_heads: int,
         head_dim: Optional[int] = None,
         group_size: int = 2048,
+        shift_ratio: float = 0.5,
         dropout: float = 0.0,
         layer_idx: int = 0,
         sink_tokens: int = 0,
