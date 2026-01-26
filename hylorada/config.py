@@ -73,6 +73,17 @@ class HyLoRADAConfig:
     mixed_precision: str = "bf16"
     max_sequence_length: int = 32768
     
+    # ============ Long-Context Extensions (LongLoRA/SinkLoRA/YaRN) ============
+    train_embeddings: bool = False  # Enable for >32k context (LongLoRA)
+    train_norms: bool = False       # Enable for >32k context (LongLoRA)
+    
+    # Sink Token Support (SinkLoRA)
+    s2_sink_tokens: int = 0         # Number of initial tokens to attend to globally
+    
+    # RoPE Scaling (YaRN/LongRoPE)
+    rope_scaling_type: Optional[str] = None  # "linear", "dynamic", "yarn"
+    rope_scaling_factor: float = 1.0
+    
     # ============ LoRA+ Learning Rates ============
     lora_plus_enabled: bool = False
     lora_plus_ratio: float = 10.0  # lr_B / lr_A
@@ -120,6 +131,11 @@ class HyLoRADAConfig:
             "max_sequence_length": self.max_sequence_length,
             "lora_plus_enabled": self.lora_plus_enabled,
             "lora_plus_ratio": self.lora_plus_ratio,
+            "train_embeddings": self.train_embeddings,
+            "train_norms": self.train_norms,
+            "s2_sink_tokens": self.s2_sink_tokens,
+            "rope_scaling_type": self.rope_scaling_type,
+            "rope_scaling_factor": self.rope_scaling_factor,
         }
     
     @classmethod

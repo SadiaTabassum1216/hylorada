@@ -148,11 +148,16 @@ class HyLoRADAModel(nn.Module):
                 num_heads=self.num_heads,
                 group_size=self.config.s2_group_size,
                 shift_ratio=self.config.s2_shift_ratio,
+                sink_tokens=self.config.s2_sink_tokens,
                 attention_pattern=self.attn_pattern,
             )
             
             # Connect DAA adapters to S²-Attn wrappers
             self._connect_daa_to_s2()
+            
+        # 5. Apply RoPE Scaling if configured (YaRN/LongRoPE)
+        if self.config.rope_scaling_type and hasattr(self.base_model, "config"):
+            self._apply_rope_scaling()
     
     def _apply_daa(self):
         """Apply PositionalDAA to attention layers for noise filtering."""
@@ -188,11 +193,41 @@ class HyLoRADAModel(nn.Module):
                         wrapper.set_daa_adapter(wrapper.base_attention.daa_adapter)
                         break
     
+    def _apply_rope_scaling(self):
+        """Inject RoPE scaling configuration into base model."""
+        rope_config = {
+            "type": self.config.rope_scaling_type,
+            "factor": self.config.rope_scaling_factor
+        }
+        
+        # Determine attribute name (transformers versions vary)
+        if hasattr(self.base_model.config, "rope_scaling"):
+            # Update existing config
+            print(f"Applying RoPE scaling: {rope_config}")
+            self.base_model.config.rope_scaling = rope_config
+        else:
+            print(f"Warning: Base model does not support rope_scaling in config")
+
     def _freeze_base_model(self):
         """Freeze all non-HyLoRADA parameters."""
         # First, freeze everything
+        # First, freeze everything
         for param in self.base_model.parameters():
             param.requires_grad = False
+            
+        # Unfreeze embeddings if configured (LongLoRA)
+        if self.config.train_embeddings:
+            for name, module in self.base_model.named_modules():
+                if isinstance(module, (nn.Embedding)):
+                    for param in module.parameters():
+                        param.requires_grad = True
+        
+        # Unfreeze norms if configured (LongLoRA)
+        if self.config.train_norms:
+            for name, module in self.base_model.named_modules():
+                if isinstance(module, (nn.LayerNorm, nn.RMSNorm)) or "norm" in name.lower():
+                    for param in module.parameters():
+                        param.requires_grad = True
         
         # Then, unfreeze HyLoRADA components
         for lora_layer in self.state.lora_layers.values():

@@ -43,9 +43,9 @@ class ShiftedSparseAttention(nn.Module):
         num_heads: int,
         head_dim: Optional[int] = None,
         group_size: int = 2048,
-        shift_ratio: float = 0.5,
         dropout: float = 0.0,
         layer_idx: int = 0,
+        sink_tokens: int = 0,
     ):
         super().__init__()
         
@@ -57,6 +57,7 @@ class ShiftedSparseAttention(nn.Module):
         self.shift_amount = int(group_size * shift_ratio)
         self.layer_idx = layer_idx
         self.should_shift = (layer_idx % 2 == 1)  # Odd layers shift
+        self.sink_tokens = sink_tokens
         
         self.scale = self.head_dim ** -0.5
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
@@ -145,8 +146,20 @@ class ShiftedSparseAttention(nn.Module):
         batch_size, num_heads, seq_len, head_dim = query.shape
         
         # Calculate number of groups (pad if necessary)
+        # Calculate number of groups (pad if necessary)
         num_groups = (seq_len + self.group_size - 1) // self.group_size
         padded_len = num_groups * self.group_size
+        
+        # Extract sink tokens if enabled
+        sink_k = None
+        sink_v = None
+        if self.sink_tokens > 0 and seq_len > self.sink_tokens:
+            sink_k = key[:, :, :self.sink_tokens, :]  # [batch, heads, sink, head_dim]
+            sink_v = value[:, :, :self.sink_tokens, :]
+            
+            # Expand for groups: [batch, heads, groups, sink, head_dim]
+            sink_k = sink_k.unsqueeze(2).expand(-1, -1, num_groups, -1, -1)
+            sink_v = sink_v.unsqueeze(2).expand(-1, -1, num_groups, -1, -1)
         
         # Pad sequences if needed
         if padded_len > seq_len:
@@ -163,19 +176,45 @@ class ShiftedSparseAttention(nn.Module):
                 )
         
         # Reshape into groups: [batch, heads, num_groups, group_size, head_dim]
+        # Reshape into groups: [batch, heads, num_groups, group_size, head_dim]
         query = query.view(batch_size, num_heads, num_groups, self.group_size, head_dim)
-        key = key.view(batch_size, num_heads, num_groups, self.group_size, head_dim)
-        value = value.view(batch_size, num_heads, num_groups, self.group_size, head_dim)
+        group_k = key.view(batch_size, num_heads, num_groups, self.group_size, head_dim)
+        group_v = value.view(batch_size, num_heads, num_groups, self.group_size, head_dim)
+        
+        # Attach sink tokens to groups
+        if sink_k is not None:
+            # Concatenate sink tokens to keys/values
+            # key shape: [..., group_size + sink, head_dim]
+            key = torch.cat([sink_k, group_k], dim=3)
+            value = torch.cat([sink_v, group_v], dim=3)
+        else:
+            key = group_k
+            value = group_v
         
         # Compute attention within each group
         # [batch, heads, groups, group_size, group_size]
         attn_scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
         
         # Apply group-wise mask if provided
+        # Apply group-wise mask if provided
         if attention_mask is not None:
             mask = attention_mask.view(
                 batch_size, 1, num_groups, self.group_size, self.group_size
             )
+            
+            # Handle sink tokens in mask
+            if sink_k is not None:
+                # Need to pad mask with zeros (allow attention) for sink tokens
+                # Current mask: [..., group_size, group_size]
+                # Target mask: [..., group_size, sink + group_size]
+                
+                # Zeros for sink tokens (allow attention)
+                sink_mask = torch.zeros(
+                    batch_size, 1, num_groups, self.group_size, self.sink_tokens,
+                    device=mask.device, dtype=mask.dtype
+                )
+                mask = torch.cat([sink_mask, mask], dim=-1)
+                
             attn_scores = attn_scores + mask
         
         # Apply DAA if provided (reshape for compatibility)
@@ -255,6 +294,7 @@ class S2AttentionWrapper(nn.Module):
         group_size: int = 2048,
         shift_ratio: float = 0.5,
         layer_idx: int = 0,
+        sink_tokens: int = 0,
     ):
         super().__init__()
         
@@ -267,6 +307,7 @@ class S2AttentionWrapper(nn.Module):
             group_size=group_size,
             shift_ratio=shift_ratio,
             layer_idx=layer_idx,
+            sink_tokens=sink_tokens,
         )
         
         # Store reference for DAA integration
@@ -338,6 +379,7 @@ def apply_s2_attention(
     num_heads: int,
     group_size: int = 2048,
     shift_ratio: float = 0.5,
+    sink_tokens: int = 0,
     attention_pattern: str = "attn",
 ) -> Tuple[nn.Module, list]:
     """
@@ -378,6 +420,7 @@ def apply_s2_attention(
                     group_size=group_size,
                     shift_ratio=shift_ratio,
                     layer_idx=layer_idx,
+                    sink_tokens=sink_tokens,
                 )
                 
                 # Replace in parent
