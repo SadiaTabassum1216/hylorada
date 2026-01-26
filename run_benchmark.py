@@ -181,6 +181,17 @@ def main():
                         help="Comma-separated layer indices for sparse (e.g., '0,5,10,15,20,23')")
     parser.add_argument("--s2_attn", action="store_true",
                         help="Enable S²-Attn for long context (4096+)")
+    parser.add_argument("--train_embeddings", action="store_true",
+                        help="Train embeddings (LongLoRA feature)")
+    parser.add_argument("--train_norms", action="store_true",
+                        help="Train norms (LongLoRA feature)")
+    parser.add_argument("--sink_tokens", type=int, default=0,
+                        help="Number of sink tokens for S²-Attn")
+    parser.add_argument("--rope_scaling_type", type=str, default=None,
+                        choices=["linear", "dynamic", "yarn"],
+                        help="RoPE scaling type (e.g. yarn)")
+    parser.add_argument("--rope_scaling_factor", type=float, default=1.0,
+                        help="RoPE scaling factor")
     args = parser.parse_args()
     
     # Parse sparse_layers if provided
@@ -275,8 +286,13 @@ def main():
                     lora_plus_ratio=17.1,
                     daa_enabled=True,
                     sparse_enabled=False,
-                    s2_attn_enabled=False,  # Disabled: GQA incompatible
+                    s2_attn_enabled=args.s2_attn,
                     max_sequence_length=args.max_length,
+                    train_embeddings=args.train_embeddings,
+                    train_norms=args.train_norms,
+                    s2_sink_tokens=args.sink_tokens,
+                    rope_scaling_type=args.rope_scaling_type,
+                    rope_scaling_factor=args.rope_scaling_factor,
                 )
                 model = HyLoRADAModel(base_model, config)
                 
