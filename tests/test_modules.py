@@ -158,8 +158,8 @@ class TestUnifiedHyLoRADA:
         rank = 8
         adapter = HyLoRADAUnified(hidden_size, hidden_size, rank=rank)
         
-        # Expected: lora_A (r*in) + lora_B (out*r) + magnitude (out) + 3 scalars
-        expected = rank * hidden_size + hidden_size * rank + hidden_size + 3
+        # Expected: lora_A (r*in) + lora_B (out*r) + magnitude (out) + 1 scalar (position_scale)
+        expected = rank * hidden_size + hidden_size * rank + hidden_size + 1
         actual = sum(p.numel() for p in adapter.parameters())
         
         assert actual == expected

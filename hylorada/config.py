@@ -13,11 +13,13 @@ class HyLoRADAConfig:
     """
     Configuration for unified HyLoRADA fine-tuning.
     
-    HyLoRADA is a novel PEFT method with these key features:
+    HyLoRADA combines proven techniques for cost-efficient long-context learning:
     1. Orthogonal initialization - Prevents rank collapse
-    2. Gated magnitude - Adaptive DoRA control
-    3. Residual LoRA+DoRA blend - Best of both dynamics
-    4. Position-aware scaling - Handles lost-in-middle
+    2. Position-aware scaling - Addresses lost-in-middle phenomenon
+    3. S²-Attn (LongLoRA) - 16x training cost reduction
+    4. Trainable embeddings & norms - Critical for >32k context
+    5. RoPE scaling (YaRN) - Extends context up to 128k
+    6. Sink tokens (SinkLoRA) - Stable attention patterns
     
     Args:
         lora_rank: Rank for LoRA decomposition
@@ -84,10 +86,6 @@ class HyLoRADAConfig:
     rope_scaling_type: Optional[str] = None  # "linear", "dynamic", "yarn"
     rope_scaling_factor: float = 1.0
     
-    # ============ LoRA+ Learning Rates ============
-    lora_plus_enabled: bool = False
-    lora_plus_ratio: float = 10.0  # lr_B / lr_A
-    
     def __post_init__(self):
         """Validate configuration."""
         if self.lora_rank < 1:
@@ -129,8 +127,6 @@ class HyLoRADAConfig:
             "gradient_checkpointing": self.gradient_checkpointing,
             "mixed_precision": self.mixed_precision,
             "max_sequence_length": self.max_sequence_length,
-            "lora_plus_enabled": self.lora_plus_enabled,
-            "lora_plus_ratio": self.lora_plus_ratio,
             "train_embeddings": self.train_embeddings,
             "train_norms": self.train_norms,
             "s2_sink_tokens": self.s2_sink_tokens,

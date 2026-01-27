@@ -1,19 +1,19 @@
 # HyLoRADA
 
-**Unified HyLoRADA** - Parameter-efficient fine-tuning for long-context LLMs.
+**Unified HyLoRADA** - Parameter-efficient fine-tuning for cost-efficient long-context LLMs.
 
 ## Key Features
 
-| Feature | Solution | Params |
-|---------|----------|--------|
-| **Rank Collapse Prevention** | Orthogonal init | 0 |
-| **Adaptive Magnitude** | Gated magnitude | +1/layer |
-| **Best of LoRA+DoRA** | Residual blend | +1/layer |
-| **Lost-in-Middle** | PositionBias | 64 shared |
-| **Noise Filtering** | PositionalDAA | ~2K/layer |
-| **Long Context** | Trainable Embeddings & Norms | ~10% |
-| **Stable Attention** | Sink Tokens | 0 |
-| **Context Extension** | RoPE Scaling (YaRN) | 0 |
+| Feature | Solution | Literature |
+|---------|----------|------------|
+| **Rank Collapse Prevention** | Orthogonal init | LongLoRA |
+| **Magnitude Normalization** | DoRA-style | DoRA |
+| **Lost-in-Middle** | PositionBias | LIFT |
+| **Noise Filtering** | PositionalDAA | - |
+| **Training Efficiency** | S²-Attn (16x faster) | LongLoRA |
+| **Context Extension** | Embeddings & Norms | LongLoRA |
+| **Stable Attention** | Sink Tokens | SinkLoRA |
+| **Position Extension** | RoPE Scaling | YaRN |
 
 ## Quick Start
 
@@ -31,9 +31,10 @@ long_context_config = HyLoRADAConfig(
     lora_rank=8,
     train_embeddings=True,    # LongLoRA
     train_norms=True,         # LongLoRA
+    s2_attn_enabled=True,     # 16x training efficiency
     s2_sink_tokens=4,         # SinkLoRA
-    rope_scaling_type="linear", # RoPE Scaling
-    rope_scaling_factor=2.0
+    rope_scaling_type="linear",
+    rope_scaling_factor=4.0,
 )
 
 wrapped = HyLoRADAModel(model, long_context_config)
@@ -58,15 +59,10 @@ python -m pytest tests/ -v
 ```
 hylorada/
 ├── config.py         # Configuration
-├── lora.py           # HyLoRADAUnified, PositionBias
+├── lora.py           # HyLoRADA adapters with orthogonal init
 ├── daa.py            # PositionalDAA
 ├── s2_attention.py   # Shifted Sparse Attention + Sink Tokens
 ├── model.py          # HyLoRADAModel wrapper
 ├── baselines.py      # Comparison methods
 └── evaluation.py     # Metrics
 ```
-
-## Version
-
-- **v0.4.0** - Long-context support (LongLoRA, SinkLoRA, YaRN)
-- **v0.3.0** - Unified architecture

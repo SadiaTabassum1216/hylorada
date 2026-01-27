@@ -1,10 +1,13 @@
 """
 LoRA Module (Low-Rank Adaptation)
 
-Implements three PEFT methods:
+Implements PEFT methods:
 1. LoRA - Low-rank adaptation (Hu et al., 2021)
 2. DoRA - Weight-decomposed LoRA (Liu et al., 2024)
-3. HyLoRADA - Our novel method with orthogonal init + gated magnitude + residual LoRA
+3. HyLoRADA - Streamlined for cost-efficient long-context learning:
+   - Orthogonal initialization (prevents rank collapse)
+   - DoRA-style magnitude normalization
+   - Position-aware scaling
 
 Key features:
 - Low-rank A/B decomposition for weight updates
@@ -251,20 +254,13 @@ class HyLoRADALinear(nn.Module):
     """
     HyLoRADA: Hybrid Low-Rank Direct Attention Adaptation.
     
-    Novel contributions over DoRA:
+    Streamlined design for cost-efficient long-context learning:
     1. Orthogonal initialization for A matrix (prevents rank collapse)
-    2. Gated magnitude (learnable gate controls magnitude contribution)
-    3. Residual LoRA path (combines DoRA and LoRA learning dynamics)
+    2. DoRA-style magnitude normalization
+    3. Position-aware scaling (addresses lost-in-middle)
     
-    The formulation is:
-        output = gate * DoRA_output + (1 - gate) * LoRA_output
-    
-    where:
-        - DoRA_output uses magnitude-direction decomposition
-        - LoRA_output is standard low-rank adaptation
-        - gate is a learnable per-layer scalar
-    
-    This hybrid approach leverages the strengths of both methods.
+    This design prioritizes efficiency while maintaining the key innovations
+    proven effective in the literature.
     
     Args:
         in_features: Input dimension
@@ -290,18 +286,12 @@ class HyLoRADALinear(nn.Module):
         self.alpha = alpha
         self.scaling = alpha / rank
         
-        # LoRA matrices with ORTHOGONAL initialization for A (Novel 1)
+        # LoRA matrices with ORTHOGONAL initialization for A
         self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
         self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
         
-        # Learnable magnitude vector (from DoRA)
+        # Learnable magnitude vector (DoRA-style)
         self.magnitude = nn.Parameter(torch.ones(out_features))
-        
-        # GATED magnitude control (Novel 2) - starts at 0.5
-        self.magnitude_gate = nn.Parameter(torch.tensor(0.0))  # sigmoid(0) = 0.5
-        
-        # RESIDUAL LoRA weight (Novel 3) - learnable blend between DoRA and LoRA
-        self.residual_weight = nn.Parameter(torch.tensor(0.1))  # Start with mostly DoRA
         
         # Dropout
         self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
@@ -309,14 +299,12 @@ class HyLoRADALinear(nn.Module):
         # Cache for base weight
         self.register_buffer("base_weight_norm", None)
         
-        # Initialize with ORTHOGONAL (Novel improvement over Kaiming)
+        # Initialize with ORTHOGONAL (key innovation)
         self.reset_parameters()
     
     def reset_parameters(self):
         """Initialize with orthogonal A matrix (prevents rank collapse)."""
-        # Orthogonal initialization for A - key improvement
         nn.init.orthogonal_(self.lora_A)
-        # Zero init for B (standard)
         nn.init.zeros_(self.lora_B)
     
     def init_magnitude(self, base_weight: torch.Tensor):
@@ -332,7 +320,7 @@ class HyLoRADALinear(nn.Module):
         base_weight: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Apply HyLoRADA adaptation with gated magnitude and residual LoRA.
+        Apply HyLoRADA adaptation with DoRA-style normalization.
         
         Args:
             x: Input tensor [batch, seq, in_features]
@@ -345,32 +333,20 @@ class HyLoRADALinear(nn.Module):
         input_dtype = x.dtype
         x_float = x.to(self.lora_A.dtype)
         
-        # Compute LoRA contribution (shared between DoRA and residual path)
+        # Compute LoRA contribution
         lora_x = self.dropout(x_float)
         lora_x = F.linear(lora_x, self.lora_A)  # [batch, seq, rank]
         lora_out = F.linear(lora_x, self.lora_B)  # [batch, seq, out_features]
         delta_v = lora_out * self.scaling
         
-        # === DoRA PATH ===
-        # Compute magnitude-weighted direction
+        # DoRA-style magnitude normalization
         updated_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling
         updated_norm = updated_weight.norm(p=2, dim=1) + 1e-8
         
-        # Apply GATED magnitude (Novel 2)
-        gate = torch.sigmoid(self.magnitude_gate)  # [0, 1]
-        effective_magnitude = self.magnitude * gate + self.base_weight_norm * (1 - gate)
+        mag_scale = self.magnitude / updated_norm
+        output = (base_output.to(self.lora_A.dtype) + delta_v) * mag_scale.unsqueeze(0).unsqueeze(0)
         
-        mag_scale = effective_magnitude / updated_norm
-        dora_output = (base_output.to(self.lora_A.dtype) + delta_v) * mag_scale.unsqueeze(0).unsqueeze(0)
-        
-        # === RESIDUAL LoRA PATH (Novel 3) ===
-        lora_output = base_output.to(self.lora_A.dtype) + delta_v
-        
-        # Blend DoRA and LoRA with learnable weight
-        residual_w = torch.sigmoid(self.residual_weight)  # [0, 1]
-        final_output = (1 - residual_w) * dora_output + residual_w * lora_output
-        
-        return final_output.to(input_dtype)
+        return output.to(input_dtype)
     
     def get_delta_weight(self) -> torch.Tensor:
         """Compute the LoRA weight delta."""
@@ -878,20 +854,17 @@ class PositionBias(nn.Module):
 
 class HyLoRADAUnified(nn.Module):
     """
-    Unified HyLoRADA: Single class with all features consolidated.
+    Unified HyLoRADA: Streamlined for cost-efficient long-context learning.
     
-    Combines:
+    Key features (literature-backed):
     - Orthogonal initialization (prevents rank collapse)
-    - Gated magnitude (adaptive DoRA control)
-    - Residual LoRA+DoRA blend (best of both)
+    - DoRA-style magnitude normalization
     - Position-scaled adaptation (handles lost-in-middle)
     
-    Parameter count per layer: r*(d_in + d_out) + d_out + 3
+    Parameter count per layer: r*(d_in + d_out) + d_out + 1
     - lora_A: r * d_in
     - lora_B: d_out * r
     - magnitude: d_out
-    - magnitude_gate: 1
-    - residual_weight: 1
     - position_scale: 1
     
     Plus 64 shared params (PositionBias) for the whole model.
@@ -926,16 +899,10 @@ class HyLoRADAUnified(nn.Module):
         self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
         self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
         
-        # Learnable magnitude vector (from DoRA)
+        # Learnable magnitude vector (DoRA-style)
         self.magnitude = nn.Parameter(torch.ones(out_features))
         
-        # GATED magnitude control - starts at 0.5
-        self.magnitude_gate = nn.Parameter(torch.tensor(0.0))
-        
-        # RESIDUAL blend between DoRA and LoRA
-        self.residual_weight = nn.Parameter(torch.tensor(0.1))
-        
-        # Position-dependent scaling factor (lightweight v2 feature)
+        # Position-dependent scaling factor
         self.position_scale = nn.Parameter(torch.tensor(0.0))
         
         # Shared position bias (passed in, not owned)
@@ -989,36 +956,21 @@ class HyLoRADAUnified(nn.Module):
         lora_out = F.linear(lora_x, self.lora_B)  # [batch, seq, out_features]
         delta_v = lora_out * self.scaling
         
-        # === Position-scaled adaptation (lightweight v2 feature) ===
+        # === Position-scaled adaptation ===
         if positions is not None and self.position_bias is not None:
-            # Get position bias: [batch, seq]
             pos_bias = self.position_bias(positions)
-            # Scale based on learned position_scale parameter
-            # sigmoid(position_scale) controls influence: 0.5 at init
             scale_weight = torch.sigmoid(self.position_scale)
-            # Position scaling in range [1-0.5*w, 1+0.5*w] based on bias
             pos_scale = 1.0 + scale_weight * torch.tanh(pos_bias).unsqueeze(-1)
             delta_v = delta_v * pos_scale
         
-        # === DoRA PATH ===
+        # DoRA-style magnitude normalization
         updated_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling
         updated_norm = updated_weight.norm(p=2, dim=1) + 1e-8
         
-        # Apply gated magnitude
-        gate = torch.sigmoid(self.magnitude_gate)
-        effective_magnitude = self.magnitude * gate + self.base_weight_norm * (1 - gate)
+        mag_scale = self.magnitude / updated_norm
+        output = (base_output.to(self.lora_A.dtype) + delta_v) * mag_scale.unsqueeze(0).unsqueeze(0)
         
-        mag_scale = effective_magnitude / updated_norm
-        dora_output = (base_output.to(self.lora_A.dtype) + delta_v) * mag_scale.unsqueeze(0).unsqueeze(0)
-        
-        # === RESIDUAL LoRA PATH ===
-        lora_output = base_output.to(self.lora_A.dtype) + delta_v
-        
-        # Blend DoRA and LoRA with learnable weight
-        residual_w = torch.sigmoid(self.residual_weight)
-        final_output = (1 - residual_w) * dora_output + residual_w * lora_output
-        
-        return final_output.to(input_dtype)
+        return output.to(input_dtype)
     
     def get_delta_weight(self) -> torch.Tensor:
         """Compute the LoRA weight delta."""
