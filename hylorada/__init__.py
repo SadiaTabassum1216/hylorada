@@ -8,6 +8,7 @@ from hylorada.lora import (
     HyLoRADAUnified,
     UnifiedLayer,
     PositionBias,
+    LandmarkLoRA,
     apply_unified_to_model,
 )
 
@@ -27,8 +28,6 @@ from hylorada.lora import (
 )
 
 # Components
-from hylorada.daa import DirectAttentionAdapter, PositionalDAA
-from hylorada.sparse_mlp import SparseMLP, SparseAdapter
 from hylorada.s2_attention import ShiftedSparseAttention
 
 # Model wrapper (uses unified internally)

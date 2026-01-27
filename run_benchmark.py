@@ -314,18 +314,31 @@ def main():
                         p.requires_grad = False
                 params = sum(p.numel() for p in base_model.parameters() if p.requires_grad)
                 print(f"  DoRA trainable params: {params:,}")
-                model = base_model
+                
+                # Wrap model to add get_trainable_params method
+                class DoRAWrapper(nn.Module):
+                    def __init__(self, model):
+                        super().__init__()
+                        self.model = model
+                    def forward(self, *args, **kwargs):
+                        return self.model(*args, **kwargs)
+                    def get_trainable_params(self):
+                        return [p for p in self.model.parameters() if p.requires_grad]
+                    def parameters(self):
+                        return self.model.parameters()
+                    def named_parameters(self):
+                        return self.model.named_parameters()
+                
+                model = DoRAWrapper(base_model)
                 train_time = train_model(model, tokenizer, train_texts, args, "DoRA")
             
             elif method == "hylorada":
-                # HyLoRADA Unified: Streamlined for efficiency
-                # Disable DAA for long context (>2048) to avoid shape issues
-                use_daa = args.max_length <= 2048
+                # HyLoRADA Unified: rsLoRA + DoRA magnitude
                 config = HyLoRADAConfig(
                     lora_rank=args.lora_rank,
                     lora_alpha=args.lora_rank * 3,
                     lora_dropout=0.01,
-                    daa_enabled=use_daa,
+                    daa_enabled=False,  # Disabled: shape issues with some models
                     sparse_enabled=False,
                     s2_attn_enabled=args.s2_attn,
                     max_sequence_length=args.max_length,

@@ -16,14 +16,12 @@ from dataclasses import dataclass
 
 from .config import HyLoRADAConfig
 from .lora import (
-    UnifiedLayer, PositionBias, HyLoRADAUnified,
+    UnifiedLayer, PositionBias, HyLoRADAUnified, LandmarkLoRA,
     apply_unified_to_model,
     count_lora_params, merge_lora_weights, get_lora_plus_param_groups,
     # Legacy imports for baselines
     apply_lora_to_model, apply_dora_to_model, apply_hylorada_adapter_to_model,
 )
-from .daa import DirectAttentionAdapter, PositionalDAA, count_daa_params
-from .sparse_mlp import SparseMLP, SparseAdapter, apply_sparse_to_ffn, count_sparse_params
 from .s2_attention import ShiftedSparseAttention, apply_s2_attention, get_s2_memory_estimate
 
 
@@ -31,10 +29,9 @@ from .s2_attention import ShiftedSparseAttention, apply_s2_attention, get_s2_mem
 class HyLoRADAState:
     """Tracks the state of HyLoRADA components in a model."""
     lora_layers: Dict[str, UnifiedLayer]
-    daa_adapters: Dict[str, DirectAttentionAdapter]
-    sparse_modules: Dict[str, SparseMLP]
     position_bias: Optional[PositionBias]
     s2_wrappers: List[Any]
+    landmark: Optional[LandmarkLoRA]
     config: HyLoRADAConfig
 
 
@@ -79,10 +76,9 @@ class HyLoRADAModel(nn.Module):
         # Initialize component tracking
         self.state = HyLoRADAState(
             lora_layers={},
-            daa_adapters={},
-            sparse_modules={},
             position_bias=None,
             s2_wrappers=[],
+            landmark=None,
             config=self.config,
         )
         
@@ -127,21 +123,7 @@ class HyLoRADAModel(nn.Module):
             use_dora_magnitude=self.config.use_dora_magnitude,
         )
         
-        # 2. Apply DAA if enabled
-        if self.config.daa_enabled:
-            self._apply_daa()
-        
-        # 3. Apply Sparse MLP if enabled
-        if self.config.sparse_enabled:
-            self.base_model, self.state.sparse_modules = apply_sparse_to_ffn(
-                model=self.base_model,
-                ffn_module_pattern=self.ffn_pattern,
-                topk_ratio=self.config.sparse_topk_ratio,
-                adapter_dim=self.config.sparse_adapter_dim,
-                target_layers=self.config.sparse_target_layers,
-            )
-        
-        # 4. Apply S²-Attn if enabled
+        # 2. Apply S²-Attn if enabled (long-context)
         if self.config.s2_attn_enabled:
             self.base_model, self.state.s2_wrappers = apply_s2_attention(
                 model=self.base_model,
@@ -153,46 +135,17 @@ class HyLoRADAModel(nn.Module):
                 attention_pattern=self.attn_pattern,
             )
             
-            # Connect DAA adapters to S²-Attn wrappers
-            self._connect_daa_to_s2()
-            
-        # 5. Apply RoPE Scaling if configured (YaRN/LongRoPE)
+        # 3. Apply RoPE Scaling if configured (YaRN/LongRoPE)
         if self.config.rope_scaling_type and hasattr(self.base_model, "config"):
             self._apply_rope_scaling()
-    
-    def _apply_daa(self):
-        """Apply PositionalDAA to attention layers for noise filtering."""
-        layer_idx = 0
         
-        for name, module in self.base_model.named_modules():
-            if self.attn_pattern in name.lower():
-                # Check if this is an attention layer
-                has_proj = any(
-                    hasattr(module, attr) for attr in 
-                    ["q_proj", "k_proj", "v_proj", "query", "key", "value", "c_attn", "c_proj"]
-                )
-                
-                if has_proj:
-                    # Use PositionalDAA for lost-in-middle handling
-                    daa = PositionalDAA(
-                        num_heads=self.num_heads,
-                        max_seq_len=self.config.max_sequence_length,
-                        num_buckets=self.config.daa_num_buckets,
-                        per_head=self.config.daa_per_head,
-                    )
-                    module.daa_adapter = daa
-                    self.state.daa_adapters[name] = daa
-                    layer_idx += 1
-    
-    def _connect_daa_to_s2(self):
-        """Connect DAA adapters to S²-Attn wrappers for integration."""
-        for wrapper in self.state.s2_wrappers:
-            # Find corresponding DAA adapter
-            for name, daa in self.state.daa_adapters.items():
-                if hasattr(wrapper, "base_attention"):
-                    if hasattr(wrapper.base_attention, "daa_adapter"):
-                        wrapper.set_daa_adapter(wrapper.base_attention.daa_adapter)
-                        break
+        # 4. Apply LandmarkLoRA if enabled (Novel context summarization)
+        if self.config.landmark_enabled:
+            self.state.landmark = LandmarkLoRA(
+                hidden_size=self.hidden_size,
+                num_landmarks=self.config.num_landmarks,
+                dropout=self.config.lora_dropout,
+            )
     
     def _apply_rope_scaling(self):
         """Inject RoPE scaling configuration into base model."""
@@ -235,18 +188,14 @@ class HyLoRADAModel(nn.Module):
             for param in lora_layer.lora.parameters():
                 param.requires_grad = True
         
-        for daa in self.state.daa_adapters.values():
-            for param in daa.parameters():
-                param.requires_grad = True
-        
-        for sparse_mod in self.state.sparse_modules.values():
-            if hasattr(sparse_mod, "sparse_adapter"):
-                for param in sparse_mod.sparse_adapter.parameters():
-                    param.requires_grad = True
-        
         # Unfreeze position bias if present
         if self.state.position_bias is not None:
             for param in self.state.position_bias.parameters():
+                param.requires_grad = True
+        
+        # Unfreeze landmark if present (Novel)
+        if self.state.landmark is not None:
+            for param in self.state.landmark.parameters():
                 param.requires_grad = True
     
     def forward(self, *args, **kwargs):
@@ -265,21 +214,15 @@ class HyLoRADAModel(nn.Module):
         """Count parameters by component."""
         total = sum(p.numel() for p in self.base_model.parameters())
         trainable = sum(p.numel() for p in self.get_trainable_params())
-        
         lora_params = count_lora_params(self.base_model)
-        daa_params = count_daa_params(self.base_model)
-        sparse_params = count_sparse_params(self.base_model)
+        landmark_params = sum(p.numel() for p in self.state.landmark.parameters()) if self.state.landmark else 0
         
         return {
             "total_params": total,
             "trainable_params": trainable,
             "trainable_ratio": trainable / max(total, 1),
             "lora_params": lora_params,
-            "daa_params": daa_params,
-            "sparse_params": sparse_params,
-            "lora_ratio": lora_params / max(trainable, 1),
-            "daa_ratio": daa_params / max(trainable, 1),
-            "sparse_ratio": sparse_params / max(trainable, 1),
+            "landmark_params": landmark_params,
         }
     
     def print_trainable_params(self):

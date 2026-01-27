@@ -1,19 +1,21 @@
 # HyLoRADA
 
-**Unified HyLoRADA** - Parameter-efficient fine-tuning for cost-efficient long-context LLMs.
+**Hybrid Low-Rank Adaptation with Landmark Memory** — Parameter-efficient fine-tuning combining rsLoRA, DoRA, and novel LandmarkLoRA for efficient context handling.
 
 ## Key Features
 
-| Feature | Solution | Literature |
-|---------|----------|------------|
-| **Rank Collapse Prevention** | Orthogonal init | LongLoRA |
-| **Magnitude Normalization** | DoRA-style | DoRA |
-| **Lost-in-Middle** | PositionBias | LIFT |
-| **Noise Filtering** | PositionalDAA | - |
-| **Training Efficiency** | S²-Attn (16x faster) | LongLoRA |
-| **Context Extension** | Embeddings & Norms | LongLoRA |
-| **Stable Attention** | Sink Tokens | SinkLoRA |
-| **Position Extension** | RoPE Scaling | YaRN |
+| Component | Description | Parameters |
+|-----------|-------------|------------|
+| **rsLoRA** | Rank-stabilized scaling (α/√r) | 0 |
+| **DoRA** | Weight-decomposed magnitude | ~86K |
+| **LandmarkLoRA** | Trainable context summary tokens | ~14K |
+| **Position Bias** | Log-bucketed position awareness | 64 |
+
+## Installation
+
+```bash
+pip install -e .
+```
 
 ## Quick Start
 
@@ -21,48 +23,54 @@
 from transformers import AutoModelForCausalLM
 from hylorada import HyLoRADAConfig, HyLoRADAModel
 
-model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2.5-0.5B")
+# Load base model
+base_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2-0.5B")
 
-# Standard Config
-config = HyLoRADAConfig(lora_rank=8)
-
-# Long-Context Config (>32k tokens)
-long_context_config = HyLoRADAConfig(
+# Apply HyLoRADA
+config = HyLoRADAConfig(
     lora_rank=8,
-    train_embeddings=True,    # LongLoRA
-    train_norms=True,         # LongLoRA
-    s2_attn_enabled=True,     # 16x training efficiency
-    s2_sink_tokens=4,         # SinkLoRA
-    rope_scaling_type="linear",
-    rope_scaling_factor=4.0,
+    lora_alpha=16.0,
+    use_dora_magnitude=True,    # DoRA magnitude normalization
+    landmark_enabled=True,       # Novel: LandmarkLoRA
+    num_landmarks=8,
+    position_bias_enabled=True,
 )
 
-wrapped = HyLoRADAModel(model, long_context_config)
-wrapped.print_trainable_params()
+model = HyLoRADAModel(base_model, config)
+model.print_trainable_params()
 ```
 
-## Usage
+## Benchmark
 
 ```bash
-# Run benchmark
-python run_benchmark.py --methods hylorada --epochs 3
+# Compare methods
+python run_benchmark.py --methods lora dora hylorada --epochs 3
 
-# Code task
-python run_code_task.py --epochs 3
-
-# Tests
-python -m pytest tests/ -v
+# Long-context benchmark
+python run_benchmark.py --methods hylorada --dataset longbench --max_length 4096
 ```
 
-## Project Structure
+## Architecture
 
 ```
-hylorada/
-├── config.py         # Configuration
-├── lora.py           # HyLoRADA adapters with orthogonal init
-├── daa.py            # PositionalDAA
-├── s2_attention.py   # Shifted Sparse Attention + Sink Tokens
-├── model.py          # HyLoRADAModel wrapper
-├── baselines.py      # Comparison methods
-└── evaluation.py     # Metrics
+HyLoRADA = rsLoRA + DoRA + LandmarkLoRA + PositionBias
+
+output = magnitude × norm(W + (α/√r)×BA) × pos_scale + landmark_context
 ```
+
+**Novel Contribution**: LandmarkLoRA introduces trainable "landmark" tokens that learn to summarize context patterns during fine-tuning.
+
+## Citation
+
+```bibtex
+@misc{hylorada2024,
+  title={HyLoRADA: Hybrid Low-Rank Adaptation with Landmark Memory},
+  year={2024},
+}
+```
+
+## References
+
+- [rsLoRA](https://arxiv.org/abs/2312.03732) - Rank Stabilization for LoRA
+- [DoRA](https://arxiv.org/abs/2402.09353) - Weight-Decomposed Low-Rank Adaptation
+- [Landmark Attention](https://arxiv.org/abs/2305.16300) - Random-Access Infinite Context

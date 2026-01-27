@@ -852,6 +852,78 @@ class PositionBias(nn.Module):
         return self.bias[bucket_ids]
 
 
+class LandmarkLoRA(nn.Module):
+    """
+    LandmarkLoRA: Trainable context summary tokens (Novel).
+    
+    Inspired by Landmark Attention but with a key difference:
+    - Landmark Attention uses fixed block gating
+    - LandmarkLoRA uses TRAINABLE landmarks as LoRA adapters
+    
+    The landmarks learn to capture important context patterns during fine-tuning,
+    providing a form of learned memory compression.
+    
+    Params: num_landmarks × hidden_size × 2 (landmarks + gate)
+    For 8 landmarks and 896 hidden: 8 × 896 + 896 × 8 = 14,336 params
+    
+    Args:
+        hidden_size: Model hidden dimension
+        num_landmarks: Number of learnable summary tokens (default: 8)
+        dropout: Dropout probability
+    """
+    
+    def __init__(
+        self,
+        hidden_size: int,
+        num_landmarks: int = 8,
+        dropout: float = 0.0,
+    ):
+        super().__init__()
+        
+        self.hidden_size = hidden_size
+        self.num_landmarks = num_landmarks
+        
+        # Learnable landmark tokens (context summaries)
+        self.landmarks = nn.Parameter(torch.randn(num_landmarks, hidden_size) * 0.02)
+        
+        # Gate to select relevant landmarks based on input
+        self.gate = nn.Linear(hidden_size, num_landmarks, bias=False)
+        
+        # Scaling factor (learnable)
+        self.scale = nn.Parameter(torch.tensor(0.1))
+        
+        self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
+    
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Apply landmark-based context enhancement.
+        
+        Args:
+            hidden_states: [batch, seq, hidden_size]
+            
+        Returns:
+            Enhanced hidden states with landmark context
+        """
+        # Compute mean representation for gating
+        mean_repr = hidden_states.mean(dim=1)  # [batch, hidden_size]
+        
+        # Soft attention over landmarks
+        gate_logits = self.gate(mean_repr)  # [batch, num_landmarks]
+        gate_weights = torch.softmax(gate_logits, dim=-1)  # [batch, num_landmarks]
+        
+        # Weighted combination of landmarks
+        context = gate_weights @ self.landmarks  # [batch, hidden_size]
+        context = self.dropout(context)
+        
+        # Add scaled context to all positions
+        output = hidden_states + self.scale * context.unsqueeze(1)
+        
+        return output
+    
+    def extra_repr(self) -> str:
+        return f"hidden_size={self.hidden_size}, num_landmarks={self.num_landmarks}"
+
+
 class HyLoRADAUnified(nn.Module):
     """
     Unified HyLoRADA: Streamlined for cost-efficient long-context learning.
@@ -894,7 +966,8 @@ class HyLoRADAUnified(nn.Module):
         self.out_features = out_features
         self.rank = rank
         self.alpha = alpha
-        self.scaling = alpha / rank
+        # rsLoRA scaling: α/√r for better gradient stability at higher ranks
+        self.scaling = alpha / (rank ** 0.5)
         self.use_dora_magnitude = use_dora_magnitude
         
         # LoRA matrices with ORTHOGONAL initialization for A

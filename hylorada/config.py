@@ -47,8 +47,8 @@ class HyLoRADAConfig:
         "c_attn", "c_proj",  # GPT-2
         "query_key_value",  # Falcon
     )
-    # DoRA magnitude: False = lightweight (~same params as LoRA), True = full DoRA magnitude
-    use_dora_magnitude: bool = False
+    # DoRA magnitude: True = better accuracy (matches full fine-tuning), False = lightweight
+    use_dora_magnitude: bool = True
 
     
     # ============ Position-Aware Scaling ============
@@ -56,22 +56,16 @@ class HyLoRADAConfig:
     position_bias_enabled: bool = True
     position_num_buckets: int = 64
     
-    # ============ DAA Settings (Noise Filtering) ============
-    daa_enabled: bool = True
-    daa_num_buckets: int = 64
-    daa_per_head: bool = True
-    
-    # ============ Sparse MLP Settings ============
-    sparse_enabled: bool = True
-    sparse_adapter_dim: int = 64  # Smaller than before for efficiency
-    sparse_topk_ratio: float = 0.1
-    sparse_target_layers: Optional[List[int]] = None  # None = all layers
-    
     # ============ S²-Attn Settings ============
     # Disabled by default - requires GQA handling
     s2_attn_enabled: bool = False
     s2_group_size: int = 2048
     s2_shift_ratio: float = 0.5
+    
+    # ============ LandmarkLoRA Settings (Novel) ============
+    # Trainable landmark tokens for context summarization
+    landmark_enabled: bool = True
+    num_landmarks: int = 8  # Number of learnable context summary tokens
     
     # ============ Training Settings ============
     gradient_checkpointing: bool = True
@@ -93,8 +87,6 @@ class HyLoRADAConfig:
         """Validate configuration."""
         if self.lora_rank < 1:
             raise ValueError(f"lora_rank must be >= 1, got {self.lora_rank}")
-        if not 0 < self.sparse_topk_ratio <= 1.0:
-            raise ValueError(f"sparse_topk_ratio must be in (0, 1], got {self.sparse_topk_ratio}")
         if not 0 < self.s2_shift_ratio <= 1.0:
             raise ValueError(f"s2_shift_ratio must be in (0, 1], got {self.s2_shift_ratio}")
     
@@ -103,8 +95,7 @@ class HyLoRADAConfig:
         return {
             "unified_lora": True,  # Always uses unified HyLoRADA
             "position_bias": self.position_bias_enabled,
-            "daa": self.daa_enabled,
-            "sparse_mlp": self.sparse_enabled,
+            "landmark": self.landmark_enabled,
             "s2_attn": self.s2_attn_enabled,
         }
     
@@ -118,13 +109,8 @@ class HyLoRADAConfig:
             "use_dora_magnitude": self.use_dora_magnitude,
             "position_bias_enabled": self.position_bias_enabled,
             "position_num_buckets": self.position_num_buckets,
-            "daa_enabled": self.daa_enabled,
-            "daa_num_buckets": self.daa_num_buckets,
-            "daa_per_head": self.daa_per_head,
-            "sparse_enabled": self.sparse_enabled,
-            "sparse_adapter_dim": self.sparse_adapter_dim,
-            "sparse_topk_ratio": self.sparse_topk_ratio,
-            "sparse_target_layers": self.sparse_target_layers,
+            "landmark_enabled": self.landmark_enabled,
+            "num_landmarks": self.num_landmarks,
             "s2_attn_enabled": self.s2_attn_enabled,
             "s2_group_size": self.s2_group_size,
             "s2_shift_ratio": self.s2_shift_ratio,

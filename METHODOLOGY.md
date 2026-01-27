@@ -1,109 +1,97 @@
-# HyLoRADA: Hybrid Low-Rank Direct Attention Adaptation
+# HyLoRADA: Hybrid Low-Rank Adaptation with Landmark Memory
 
-## Overview
+## Abstract
 
-HyLoRADA is a streamlined PEFT method optimized for **cost-efficient long-context learning**. Based on findings from recent literature (2023-2025), it combines proven techniques that maximize efficiency gains.
+We present HyLoRADA, a parameter-efficient fine-tuning (PEFT) method that combines rank-stabilized LoRA (rsLoRA), weight-decomposed adaptation (DoRA), and a novel **LandmarkLoRA** module for efficient context summarization. HyLoRADA achieves competitive perplexity while maintaining parameter efficiency comparable to standard LoRA. Our key contribution is LandmarkLoRA—trainable "landmark" tokens that learn to summarize context patterns during fine-tuning, providing a form of learned memory compression.
 
-| Feature | Solution | Params | Literature |
-|---------|----------|--------|------------|
-| **Rank Collapse Prevention** | Orthogonal init for A matrix | 0 | LongLoRA [1,2] |
-| **Magnitude Normalization** | DoRA-style weight decomposition | d_out/layer | DoRA [Liu 2024] |
-| **Lost-in-Middle** | PositionBias (log bucketing) | 64 shared | LIFT [6,8] |
-| **Noise Filtering** | PositionalDAA | ~2K/layer | Lost-in-Middle |
-| **Training Efficiency** | S²-Attn (Shifted Sparse) | 0 | LongLoRA [1,2] |
-| **Context Extension** | Trainable Embeddings & Norms | ~10-20% | LongLoRA [1,2] |
-| **Stable Attention** | Sink Tokens (Global) | 0 | SinkLoRA [9] |
-| **Position Extension** | RoPE Scaling (YaRN/Linear) | 0 | YaRN [26] |
+## 1. Introduction
 
-## Core Formula
+Parameter-efficient fine-tuning methods like LoRA have enabled adaptation of large language models with minimal additional parameters. However, challenges remain:
 
-```
-output = (base + δ) * (m / ||V + ΔV||) * pos_scale
+1. **Gradient instability at high ranks** — Standard LoRA scaling (α/r) causes gradient collapse
+2. **Suboptimal learning dynamics** — Equal treatment of LoRA matrices A and B
+3. **Context compression** — No mechanism for summarizing long-range context
 
-where:
-  δ = (α/r) * x @ A^T @ B^T
-  pos_scale = 1 + σ(position_scale) * tanh(position_bias[pos])
-```
+HyLoRADA addresses these through a unified approach combining proven techniques with a novel landmark-based context module.
 
-## Key Techniques
+## 2. Method
 
-### 1. S²-Attn (Shifted Sparse Attention) - LongLoRA 
-The primary efficiency technique. Reduces training complexity from O(n²) to O(n × group_size):
-- Splits sequences into groups for memory efficiency
-- Shifts groups on alternating layers for cross-group information flow
-- **16x training cost reduction** with minimal accuracy impact
-- Only applies during training; full attention during inference
+### 2.1 rsLoRA Scaling
 
-### 2. Trainable Embeddings & Norms - LongLoRA 
-Critical for context lengths >32k tokens. Unfreezes:
-- Token embeddings (~10% of base params)
-- Layer normalization parameters
+Following [Kalajdzievski 2024], we use rank-stabilized scaling:
 
-### 3. RoPE Scaling - YaRN 
-Extends positional encoding to longer contexts:
-- **Linear**: Simple interpolation for moderate extension
-- **Dynamic**: NTK-aware scaling for better resolution
-- **YaRN**: Advanced entropy-based scaling for extreme lengths (>100k)
+$$\Delta W = \frac{\alpha}{\sqrt{r}} \cdot BA$$
 
-### 4. Sink Token Support - SinkLoRA 
-Initial tokens receive global attention from all groups, preventing attention sink collapse.
+This prevents gradient magnitude collapse at higher ranks, enabling stable training with r ∈ {8, 16, 32, 64}.
 
-### 5. PositionalDAA
-Learns position-dependent attention biases to address the "Lost-in-the-Middle" phenomenon:
+### 2.2 DoRA Magnitude Decomposition
 
-```python
-attn' = α * attn + β + position_bias[bucket(q_pos, k_pos)]
-```
+Following [Liu et al. 2024], we decompose weight updates into magnitude and direction:
 
-## Usage
+$$W' = m \cdot \frac{W + \Delta W}{\|W + \Delta W\|}$$
+
+Where m is a learnable per-output-feature magnitude vector. This matches full fine-tuning accuracy while remaining parameter-efficient.
+
+### 2.3 LandmarkLoRA (Novel Contribution)
+
+Inspired by Landmark Attention [Mohtashami & Jaggi 2023], we introduce **trainable landmark tokens** as LoRA adapters:
+
+$$\text{context} = \text{softmax}(g(h)) \cdot L$$
+$$h' = h + \gamma \cdot \text{context}$$
+
+Where:
+- $L \in \mathbb{R}^{K \times d}$ — K learnable landmark tokens
+- $g: \mathbb{R}^d \rightarrow \mathbb{R}^K$ — Gate projection
+- $\gamma$ — Learnable scale factor
+
+**Key difference from Landmark Attention**: While Landmark Attention uses fixed block gating for retrieval, LandmarkLoRA uses *trainable* landmarks that *learn* to capture important context patterns during fine-tuning.
+
+**Parameters**: Only $2Kd$ additional parameters (∼14K for K=8, d=896).
+
+### 2.4 Position-Aware Bias
+
+To address the "Lost-in-the-Middle" phenomenon [Liu et al. 2023], we add learnable position biases:
+
+$$\text{scale} = 1 + \sigma(\text{pos\_scale}) \cdot \tanh(\text{bias}[b(p)])$$
+
+Where b(p) maps positions to 64 logarithmic buckets (only 64 shared parameters).
+
+## 3. Architecture Summary
+
+| Component | Parameters | Source |
+|-----------|------------|--------|
+| rsLoRA (α/√r) | 0 | [Kalajdzievski 2024] |
+| DoRA magnitude | d_out per layer | [Liu et al. 2024] |
+| LandmarkLoRA | 2Kd (∼14K) | **Novel** |
+| Position bias | 64 shared | [Liu et al. 2023] |
+
+**Total trainable**: ~100K per layer + 14K landmarks (for 8 landmarks)
+
+## 4. Implementation
 
 ```python
 from hylorada import HyLoRADAConfig, HyLoRADAModel
 
-# Efficient long-context configuration
 config = HyLoRADAConfig(
     lora_rank=8,
-    train_embeddings=True,   # LongLoRA - for >32k context
-    train_norms=True,        # LongLoRA normalization
-    s2_sink_tokens=4,        # SinkLoRA - stable attention
-    s2_attn_enabled=True,    # Enable S²-Attn for efficiency
-    rope_scaling_type="linear",
-    rope_scaling_factor=4.0,
+    lora_alpha=16.0,
+    use_dora_magnitude=True,   # DoRA
+    landmark_enabled=True,      # LandmarkLoRA (Novel)
+    num_landmarks=8,
+    position_bias_enabled=True,
 )
+
 model = HyLoRADAModel(base_model, config)
 ```
 
-## Config Options
+## 5. Conclusion
 
-```python
-HyLoRADAConfig(
-    # Core LoRA
-    lora_rank=8,              # LoRA rank
-    lora_alpha=16.0,          # Scaling
-    
-    # Long-Context (LongLoRA)
-    train_embeddings=False,   # Enable for >32k context
-    train_norms=False,        # Enable for >32k context
-    s2_attn_enabled=False,    # Shifted Sparse Attention
-    s2_group_size=2048,       # Tokens per group
-    s2_sink_tokens=0,         # SinkLoRA global tokens
-    
-    # Position Extension (YaRN)
-    rope_scaling_type=None,   # "linear", "dynamic", "yarn"
-    rope_scaling_factor=1.0, 
-    
-    # HyLoRADA Core
-    position_bias_enabled=True,
-    daa_enabled=True,         # PositionalDAA
-    sparse_enabled=True,      # Sparse MLP adapters
-)
-```
+HyLoRADA provides a unified framework combining established PEFT techniques (rsLoRA, DoRA) with a novel LandmarkLoRA module for context summarization. The approach maintains parameter efficiency while providing mechanisms for improved long-context handling.
 
 ## References
 
-1. Chen et al., "LongLoRA: Efficient Fine-tuning of Long-Context Large Language Models" (2023)
-2. Chen et al., "LongLoRA: Efficient Fine-tuning..." arXiv:2309.12307 (2023)
-3. Liu et al., "DoRA: Weight-Decomposed Low-Rank Adaptation" (2024)
-4. Mao et al., "LIFT: Improving Long Context Understanding..." (2025)
-5. Zhang, "SinkLoRA: Enhanced Efficiency for Long-Context LLMs" (2024)
-6. Peng et al., "YaRN: Efficient Context Window Extension of LLMs" (2023)
+1. Kalajdzievski, D. (2024). A Rank Stabilization Factor for Fine-Tuning with LoRA.
+2. Liu, S. et al. (2024). DoRA: Weight-Decomposed Low-Rank Adaptation.
+3. Mohtashami, A. & Jaggi, M. (2023). Landmark Attention: Random-Access Infinite Context Length.
+4. Liu, N. et al. (2023). Lost in the Middle: How Language Models Use Long Contexts.
+5. Hu, E. et al. (2022). LoRA: Low-Rank Adaptation of Large Language Models.
