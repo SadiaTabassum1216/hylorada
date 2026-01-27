@@ -237,9 +237,8 @@ class HyLoRADAModel(nn.Module):
         print(f"Trainable ratio:      {counts['trainable_ratio']:.4%}")
         print("-" * 60)
         print("Component Breakdown:")
-        print(f"  LoRA:       {counts['lora_params']:,} ({counts['lora_ratio']:.1%} of trainable)")
-        print(f"  DAA:        {counts['daa_params']:,} ({counts['daa_ratio']:.1%} of trainable)")
-        print(f"  Sparse MLP: {counts['sparse_params']:,} ({counts['sparse_ratio']:.1%} of trainable)")
+        print(f"  LoRA:       {counts['lora_params']:,}")
+        print(f"  Landmark:   {counts['landmark_params']:,}")
         print("=" * 60)
     
     def get_memory_estimate(self, seq_len: int, batch_size: int = 1) -> Dict[str, float]:
