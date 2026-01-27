@@ -19,6 +19,7 @@ import time
 from datetime import datetime
 
 import torch
+import torch.nn as nn
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
 
@@ -333,13 +334,11 @@ def main():
                 train_time = train_model(model, tokenizer, train_texts, args, "DoRA")
             
             elif method == "hylorada":
-                # HyLoRADA Unified: rsLoRA + DoRA magnitude
+                # HyLoRADA Unified: rsLoRA + DoRA + LandmarkLoRA
                 config = HyLoRADAConfig(
                     lora_rank=args.lora_rank,
                     lora_alpha=args.lora_rank * 3,
                     lora_dropout=0.01,
-                    daa_enabled=False,  # Disabled: shape issues with some models
-                    sparse_enabled=False,
                     s2_attn_enabled=args.s2_attn,
                     max_sequence_length=args.max_length,
                     train_embeddings=args.train_embeddings,
