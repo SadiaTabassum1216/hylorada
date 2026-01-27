@@ -86,30 +86,40 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
     - pg19: PG19 books (very long context)
     """
     if dataset_name == "wikitext":
-        try:
-            # Try wikitext-2-raw (standard)
-            dataset = load_dataset("wikitext", "wikitext-2-raw-v1")
-        except Exception as e:
-            print(f"    Warning: wikitext-2-raw-v1 failed ({e}), trying wikitext-103-raw-v1...")
+        # Use working wikitext datasets
+        fallbacks = [
+            ("Salesforce/wikitext", "wikitext-2-raw-v1"),
+            ("Salesforce/wikitext", "wikitext-103-raw-v1"),
+            ("roneneldan/TinyStories", None),
+        ]
+        dataset = None
+        for ds_name, subset in fallbacks:
             try:
-                # Try larger wikitext-103
-                dataset = load_dataset("wikitext", "wikitext-103-raw-v1")
-            except Exception as e2:
-                print(f"    Warning: wikitext-103 failed ({e2}), trying ptb_text_only...")
-                try: 
-                    # Try Penn Treebank
-                    dataset = load_dataset("ptb_text_only", "penn_treebank")
-                except Exception as e3:
-                    print(f"    Error: All text datasets failed. Please check internet connection.")
-                    raise e3
+                if subset:
+                    dataset = load_dataset(ds_name, subset, trust_remote_code=True)
+                else:
+                    dataset = load_dataset(ds_name, split="train", trust_remote_code=True)
+                    # TinyStories format
+                    texts = [t["text"] for t in dataset if len(t.get("text", "").strip()) > 50]
+                    train_texts = texts[:num_train]
+                    test_texts = texts[num_train:num_train + num_test]
+                    print(f"    Dataset: {ds_name}")
+                    return train_texts, test_texts
+                break
+            except Exception as e:
+                print(f"    Warning: {ds_name} failed ({e})")
+                continue
+        
+        if dataset is None:
+            raise RuntimeError("All text datasets failed. Please check internet connection.")
         
         train_texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 50][:num_train]
         test_texts = [t for t in dataset["test"]["text"] if len(t.strip()) > 50][:num_test]
-        print(f"    Dataset: Standard Language Modeling (WikiText/PTB)")
+        print(f"    Dataset: Standard Language Modeling (WikiText)")
         
     elif dataset_name == "code":
         try:
-            dataset = load_dataset("nuprl/MultiPL-E", "humaneval-py", split="test")
+            dataset = load_dataset("nuprl/MultiPL-E", "humaneval-py", split="test", trust_remote_code=True)
             texts = [f"# Python:\\n{s['prompt']}" for s in dataset if s.get("prompt")]
             while len(texts) < num_train + num_test:
                 texts = texts + texts
@@ -121,9 +131,9 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
             return load_dataset_by_name("wikitext", num_train, num_test, max_length)
             
     elif dataset_name == "longbench":
-        # Use wikitext-103 (long articles, no deprecated scripts)
+        # Use Salesforce wikitext-103 (long articles)
         try:
-            dataset = load_dataset("wikitext", "wikitext-103-raw-v1")
+            dataset = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", trust_remote_code=True)
             texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 2000]
             print(f"    Found {len(texts)} long articles (>2000 chars)")
             train_texts = texts[:num_train]
@@ -170,14 +180,15 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
             return load_dataset_by_name("wikitext", num_train, num_test, max_length)
 
     elif dataset_name == "ptb":
-        # Penn Treebank
+        # Penn Treebank - try alternative
         try:
-            dataset = load_dataset("ptb_text_only", "penn_treebank")
-            train_texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 50][:num_train]
-            test_texts = [t for t in dataset["test"]["text"] if len(t.strip()) > 50][:num_test]
-            print(f"    Dataset: Penn Treebank")
+            dataset = load_dataset("roneneldan/TinyStories", split="train", trust_remote_code=True)
+            texts = [t["text"] for t in dataset if len(t.get("text", "").strip()) > 50]
+            train_texts = texts[:num_train]
+            test_texts = texts[num_train:num_train + num_test]
+            print(f"    Dataset: TinyStories (PTB alternative)")
         except Exception as e:
-            print(f"    Warning: PTB failed ({e}), using wikitext")
+            print(f"    Warning: TinyStories failed ({e}), using wikitext")
             return load_dataset_by_name("wikitext", num_train, num_test, max_length)
 
     else:
@@ -305,13 +316,11 @@ def main():
                 train_time = train_model(model, tokenizer, train_texts, args, "DoRA")
             
             elif method == "hylorada":
-                # HyLoRADA Unified: All features in one
+                # HyLoRADA Unified: Streamlined for efficiency
                 config = HyLoRADAConfig(
                     lora_rank=args.lora_rank,
                     lora_alpha=args.lora_rank * 3,
                     lora_dropout=0.01,
-                    lora_plus_enabled=True,
-                    lora_plus_ratio=17.1,
                     daa_enabled=True,
                     sparse_enabled=False,
                     s2_attn_enabled=args.s2_attn,
@@ -323,13 +332,6 @@ def main():
                     rope_scaling_factor=args.rope_scaling_factor,
                 )
                 model = HyLoRADAModel(base_model, config)
-                
-                # Apply optimized gate/residual initialization
-                for module in model.modules():
-                    if hasattr(module, 'magnitude_gate'):
-                        module.magnitude_gate.data.fill_(0.37)
-                    if hasattr(module, 'residual_weight'):
-                        module.residual_weight.data.fill_(0.22)
                 
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]
