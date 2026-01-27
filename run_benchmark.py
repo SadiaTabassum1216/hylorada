@@ -96,9 +96,9 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
         for ds_name, subset in fallbacks:
             try:
                 if subset:
-                    dataset = load_dataset(ds_name, subset, trust_remote_code=True)
+                    dataset = load_dataset(ds_name, subset)
                 else:
-                    dataset = load_dataset(ds_name, split="train", trust_remote_code=True)
+                    dataset = load_dataset(ds_name, split="train")
                     # TinyStories format
                     texts = [t["text"] for t in dataset if len(t.get("text", "").strip()) > 50]
                     train_texts = texts[:num_train]
@@ -119,7 +119,7 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
         
     elif dataset_name == "code":
         try:
-            dataset = load_dataset("nuprl/MultiPL-E", "humaneval-py", split="test", trust_remote_code=True)
+            dataset = load_dataset("nuprl/MultiPL-E", "humaneval-py", split="test")
             texts = [f"# Python:\\n{s['prompt']}" for s in dataset if s.get("prompt")]
             while len(texts) < num_train + num_test:
                 texts = texts + texts
@@ -133,7 +133,7 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
     elif dataset_name == "longbench":
         # Use Salesforce wikitext-103 (long articles)
         try:
-            dataset = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1", trust_remote_code=True)
+            dataset = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1")
             texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 2000]
             print(f"    Found {len(texts)} long articles (>2000 chars)")
             train_texts = texts[:num_train]
@@ -182,7 +182,7 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
     elif dataset_name == "ptb":
         # Penn Treebank - try alternative
         try:
-            dataset = load_dataset("roneneldan/TinyStories", split="train", trust_remote_code=True)
+            dataset = load_dataset("roneneldan/TinyStories", split="train")
             texts = [t["text"] for t in dataset if len(t.get("text", "").strip()) > 50]
             train_texts = texts[:num_train]
             test_texts = texts[num_train:num_train + num_test]
