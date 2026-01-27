@@ -298,8 +298,7 @@ def main():
                 train_time = train_model(model, tokenizer, train_texts, args, "LoRA")
             
             elif method == "dora":
-                # DoRA: Using baseline LoRA with DoRA-style training
-                # (DoRA is now a baseline, not in unified path)
+                # DoRA: Using DoRA layers
                 from hylorada.lora import apply_dora_to_model
                 apply_dora_to_model(
                     base_model,
@@ -307,21 +306,26 @@ def main():
                     rank=args.lora_rank,
                     alpha=args.lora_rank * 2,
                 )
-                # Freeze base and count params
-                for p in base_model.parameters():
-                    if not any(n in ["lora", "dora"] for n in []):
+                # Freeze base params, keep DoRA params trainable
+                for name, p in base_model.named_parameters():
+                    if "lora" in name or "dora" in name or "magnitude" in name:
+                        p.requires_grad = True
+                    else:
                         p.requires_grad = False
                 params = sum(p.numel() for p in base_model.parameters() if p.requires_grad)
+                print(f"  DoRA trainable params: {params:,}")
                 model = base_model
                 train_time = train_model(model, tokenizer, train_texts, args, "DoRA")
             
             elif method == "hylorada":
                 # HyLoRADA Unified: Streamlined for efficiency
+                # Disable DAA for long context (>2048) to avoid shape issues
+                use_daa = args.max_length <= 2048
                 config = HyLoRADAConfig(
                     lora_rank=args.lora_rank,
                     lora_alpha=args.lora_rank * 3,
                     lora_dropout=0.01,
-                    daa_enabled=True,
+                    daa_enabled=use_daa,
                     sparse_enabled=False,
                     s2_attn_enabled=args.s2_attn,
                     max_sequence_length=args.max_length,
