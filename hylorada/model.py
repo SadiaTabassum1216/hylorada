@@ -266,18 +266,11 @@ class HyLoRADAModel(nn.Module):
             state_dict[f"lora.{name}.A"] = layer.lora.lora_A.data
             state_dict[f"lora.{name}.B"] = layer.lora.lora_B.data
         
-        # Save DAA weights
-        for name, daa in self.state.daa_adapters.items():
-            state_dict[f"daa.{name}.alpha"] = daa.alpha.data
-            state_dict[f"daa.{name}.beta"] = daa.beta.data
-        
-        # Save Sparse adapter weights
-        for name, sparse in self.state.sparse_modules.items():
-            if hasattr(sparse, "sparse_adapter"):
-                adapter = sparse.sparse_adapter
-                state_dict[f"sparse.{name}.down"] = adapter.down_proj.weight.data
-                state_dict[f"sparse.{name}.up"] = adapter.up_proj.weight.data
-                state_dict[f"sparse.{name}.gate"] = adapter.gate.gate_scores.data
+        # Save Landmark weights
+        if self.state.landmark is not None:
+            state_dict["landmark.landmarks"] = self.state.landmark.landmarks.data
+            state_dict["landmark.gate"] = self.state.landmark.gate.weight.data
+            state_dict["landmark.scale"] = self.state.landmark.scale.data
         
         # Save config
         state_dict["config"] = self.config.to_dict()
@@ -295,19 +288,11 @@ class HyLoRADAModel(nn.Module):
                 layer.lora.lora_A.data = state_dict[f"lora.{name}.A"]
                 layer.lora.lora_B.data = state_dict[f"lora.{name}.B"]
         
-        # Load DAA weights
-        for name, daa in self.state.daa_adapters.items():
-            if f"daa.{name}.alpha" in state_dict:
-                daa.alpha.data = state_dict[f"daa.{name}.alpha"]
-                daa.beta.data = state_dict[f"daa.{name}.beta"]
-        
-        # Load Sparse weights
-        for name, sparse in self.state.sparse_modules.items():
-            if hasattr(sparse, "sparse_adapter") and f"sparse.{name}.down" in state_dict:
-                adapter = sparse.sparse_adapter
-                adapter.down_proj.weight.data = state_dict[f"sparse.{name}.down"]
-                adapter.up_proj.weight.data = state_dict[f"sparse.{name}.up"]
-                adapter.gate.gate_scores.data = state_dict[f"sparse.{name}.gate"]
+        # Load Landmark weights
+        if self.state.landmark is not None and "landmark.landmarks" in state_dict:
+            self.state.landmark.landmarks.data = state_dict["landmark.landmarks"]
+            self.state.landmark.gate.weight.data = state_dict["landmark.gate"]
+            self.state.landmark.scale.data = state_dict["landmark.scale"]
         
         print(f"Loaded HyLoRADA weights from {path}")
 
