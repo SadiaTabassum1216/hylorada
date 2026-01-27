@@ -146,6 +146,27 @@ class HyLoRADAModel(nn.Module):
                 num_landmarks=self.config.num_landmarks,
                 dropout=self.config.lora_dropout,
             )
+            # Register hook to apply landmark to hidden states
+            self._register_landmark_hook()
+    
+    def _register_landmark_hook(self):
+        """Register forward hook to apply LandmarkLoRA to hidden states."""
+        # Find the final layer norm (before LM head)
+        norm_module = None
+        for name, module in self.base_model.named_modules():
+            if any(n in name.lower() for n in ["norm", "ln_f", "final_layer_norm"]):
+                if isinstance(module, (torch.nn.LayerNorm, torch.nn.RMSNorm)) or "norm" in type(module).__name__.lower():
+                    norm_module = module
+        
+        if norm_module is not None:
+            def landmark_hook(module, input, output):
+                # Apply LandmarkLoRA to hidden states
+                if self.state.landmark is not None:
+                    return self.state.landmark(output)
+                return output
+            
+            norm_module.register_forward_hook(landmark_hook)
+            print(f"Registered LandmarkLoRA hook on final norm layer")
     
     def _apply_rope_scaling(self):
         """Inject RoPE scaling configuration into base model."""
