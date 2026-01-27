@@ -886,6 +886,7 @@ class HyLoRADAUnified(nn.Module):
         alpha: float = 16.0,
         dropout: float = 0.0,
         position_bias: Optional['PositionBias'] = None,
+        use_dora_magnitude: bool = False,
     ):
         super().__init__()
         
@@ -894,13 +895,17 @@ class HyLoRADAUnified(nn.Module):
         self.rank = rank
         self.alpha = alpha
         self.scaling = alpha / rank
+        self.use_dora_magnitude = use_dora_magnitude
         
         # LoRA matrices with ORTHOGONAL initialization for A
         self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
         self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
         
-        # Learnable magnitude vector (DoRA-style)
-        self.magnitude = nn.Parameter(torch.ones(out_features))
+        # Learnable magnitude vector (DoRA-style) - only if enabled
+        if use_dora_magnitude:
+            self.magnitude = nn.Parameter(torch.ones(out_features))
+        else:
+            self.magnitude = None
         
         # Position-dependent scaling factor
         self.position_scale = nn.Parameter(torch.tensor(0.0))
@@ -963,12 +968,16 @@ class HyLoRADAUnified(nn.Module):
             pos_scale = 1.0 + scale_weight * torch.tanh(pos_bias).unsqueeze(-1)
             delta_v = delta_v * pos_scale
         
-        # DoRA-style magnitude normalization
-        updated_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling
-        updated_norm = updated_weight.norm(p=2, dim=1) + 1e-8
-        
-        mag_scale = self.magnitude / updated_norm
-        output = (base_output.to(self.lora_A.dtype) + delta_v) * mag_scale.unsqueeze(0).unsqueeze(0)
+        # Compute output based on mode
+        if self.use_dora_magnitude and self.magnitude is not None:
+            # DoRA-style magnitude normalization
+            updated_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling
+            updated_norm = updated_weight.norm(p=2, dim=1) + 1e-8
+            mag_scale = self.magnitude / updated_norm
+            output = (base_output.to(self.lora_A.dtype) + delta_v) * mag_scale.unsqueeze(0).unsqueeze(0)
+        else:
+            # Lightweight mode: pure LoRA (just orthogonal init benefit)
+            output = base_output.to(self.lora_A.dtype) + delta_v
         
         return output.to(input_dtype)
     
@@ -980,7 +989,7 @@ class HyLoRADAUnified(nn.Module):
         has_pos = self.position_bias is not None
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
-            f"rank={self.rank}, alpha={self.alpha}, position_aware={has_pos}"
+            f"rank={self.rank}, alpha={self.alpha}, position_aware={has_pos}, dora={self.use_dora_magnitude}"
         )
 
 
@@ -999,10 +1008,12 @@ class UnifiedLayer(nn.Module):
         alpha: float = 16.0,
         dropout: float = 0.0,
         position_bias: Optional[PositionBias] = None,
+        use_dora_magnitude: bool = False,
     ):
         super().__init__()
         
         self.base_layer = base_layer
+        self.use_dora_magnitude = use_dora_magnitude
         
         # Handle both nn.Linear and Conv1D (GPT-2)
         if hasattr(base_layer, 'nf'):  # Conv1D from transformers
@@ -1023,11 +1034,13 @@ class UnifiedLayer(nn.Module):
             alpha=alpha,
             dropout=dropout,
             position_bias=position_bias,
+            use_dora_magnitude=use_dora_magnitude,
         )
         
-        # Initialize magnitude from base weights
-        with torch.no_grad():
-            self.adapter.init_magnitude(self._base_weight.data.float())
+        # Initialize magnitude from base weights (only if using DoRA)
+        if use_dora_magnitude:
+            with torch.no_grad():
+                self.adapter.init_magnitude(self._base_weight.data.float())
         
         # Freeze base layer
         for param in self.base_layer.parameters():
@@ -1069,6 +1082,7 @@ def apply_unified_to_model(
     alpha: float = 16.0,
     dropout: float = 0.0,
     use_position_bias: bool = True,
+    use_dora_magnitude: bool = False,
 ) -> Tuple[nn.Module, Dict[str, UnifiedLayer], Optional[PositionBias]]:
     """
     Apply unified HyLoRADA adapters to target modules.
@@ -1083,6 +1097,7 @@ def apply_unified_to_model(
         alpha: Scaling factor
         dropout: Dropout probability
         use_position_bias: Whether to use position-aware scaling
+        use_dora_magnitude: If True, use DoRA-style magnitude (more params). False = lightweight.
         
     Returns:
         Tuple of (modified model, dict of unified layers, shared position bias)
@@ -1101,6 +1116,7 @@ def apply_unified_to_model(
             alpha=alpha,
             dropout=dropout,
             position_bias=position_bias,
+            use_dora_magnitude=use_dora_magnitude,
         )
         
         # Replace module in parent

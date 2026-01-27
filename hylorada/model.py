@@ -124,6 +124,7 @@ class HyLoRADAModel(nn.Module):
             alpha=self.config.lora_alpha,
             dropout=self.config.lora_dropout,
             use_position_bias=self.config.position_bias_enabled,
+            use_dora_magnitude=self.config.use_dora_magnitude,
         )
         
         # 2. Apply DAA if enabled

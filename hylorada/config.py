@@ -47,6 +47,9 @@ class HyLoRADAConfig:
         "c_attn", "c_proj",  # GPT-2
         "query_key_value",  # Falcon
     )
+    # DoRA magnitude: False = lightweight (~same params as LoRA), True = full DoRA magnitude
+    use_dora_magnitude: bool = False
+
     
     # ============ Position-Aware Scaling ============
     # Addresses lost-in-middle with only 64 shared params
@@ -112,6 +115,7 @@ class HyLoRADAConfig:
             "lora_alpha": self.lora_alpha,
             "lora_dropout": self.lora_dropout,
             "lora_target_modules": list(self.lora_target_modules),
+            "use_dora_magnitude": self.use_dora_magnitude,
             "position_bias_enabled": self.position_bias_enabled,
             "position_num_buckets": self.position_num_buckets,
             "daa_enabled": self.daa_enabled,
