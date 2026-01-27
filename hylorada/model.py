@@ -48,7 +48,7 @@ class HyLoRADAModel(nn.Module):
         from hylorada import HyLoRADAModel, HyLoRADAConfig
         
         base_model = AutoModelForCausalLM.from_pretrained("meta-llama/Llama-2-7b-hf")
-        config = HyLoRADAConfig(lora_rank=8, daa_enabled=True)
+        config = HyLoRADAConfig(lora_rank=8, landmark_enabled=True)
         
         model = HyLoRADAModel(base_model, config)
         model.print_trainable_params()
@@ -146,6 +146,8 @@ class HyLoRADAModel(nn.Module):
                 num_landmarks=self.config.num_landmarks,
                 dropout=self.config.lora_dropout,
             )
+            # Register as submodule so it moves with model.to(device)
+            self.add_module("landmark_module", self.state.landmark)
             # Register hook to apply landmark to hidden states
             self._register_landmark_hook()
     
