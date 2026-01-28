@@ -40,6 +40,11 @@ def load_fresh_model(model_name, device, dtype):
 
 def train_model(model, tokenizer, train_texts, args, method_name):
     """Train a model and return training time."""
+    # Ensure model is on correct device and dtype
+    device = next(model.parameters()).device
+    dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
+    model.to(device=device, dtype=dtype)
+    
     train_dataloader = create_long_context_dataloader(
         dataset=train_texts, tokenizer=tokenizer,
         max_length=args.max_length, batch_size=args.batch_size,
