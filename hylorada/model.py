@@ -149,7 +149,16 @@ class HyLoRADAModel(nn.Module):
             # Register as submodule so it moves with model.to(device)
             self.add_module("landmark_module", self.state.landmark)
             # Register hook to apply landmark to hidden states
+            # Register hook to apply landmark to hidden states
             self._register_landmark_hook()
+            
+        # 5. Enable Gradient Checkpointing if configured
+        if self.config.gradient_checkpointing:
+            if hasattr(self.base_model, "gradient_checkpointing_enable"):
+                self.base_model.gradient_checkpointing_enable()
+                # Required when using checkpointing with frozen weights
+                self.base_model.enable_input_require_grads()
+                print("Gradient checkpointing enabled (memory optimized)")
     
     def _register_landmark_hook(self):
         """Register forward hook to apply LandmarkLoRA to hidden states."""

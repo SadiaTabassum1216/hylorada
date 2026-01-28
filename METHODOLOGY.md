@@ -2,7 +2,7 @@
 
 ## Abstract
 
-HyLoRADA combines rank-stabilized LoRA (rsLoRA) with weight-decomposed adaptation (DoRA) for improved parameter-efficient fine-tuning. The method addresses gradient instability at high ranks while maintaining accuracy through magnitude-direction decomposition.
+HyLoRADA combines rank-stabilized LoRA (rsLoRA) with weight-decomposed adaptation (DoRA) in a novel **Hybrid Blend** architecture. The method dynamically balances between directional updates (DoRA) and standard low-rank updates (LoRA) using a learnable residual gate, while incorporating **LandmarkLoRA** for compressed context memory.
 
 ## 1. Core Components
 
@@ -49,18 +49,29 @@ Using 64 logarithmic position buckets (only 64 shared parameters total).
 
 ## 2. Combined Architecture
 
-**HyLoRADA** = rsLoRA + DoRA + PositionBias
+### 1.4 LandmarkLoRA: Context Compression
+
+To enhance long-context capabilities, we introduce **LandmarkLoRA**, which adds learnable "landmark" tokens (context summaries) to the model. Unlike fixed-gating approaches, these landmarks are optimized during fine-tuning to compress and retain critical global information, functioning as a trainable memory bank.
+
+## 2. Combined Architecture
+
+**HyLoRADA Unified** = Hybrid(rsLoRA, DoRA) + PositionBias + LandmarkLoRA
 
 ```python
-# LoRA update with rsLoRA scaling
+# 1. Compute Base Components
 lora_update = (alpha / sqrt(rank)) * (x @ A.T @ B.T)
+dora_norm = (W + lora_update) / ||W + lora_update||
 
-# DoRA magnitude normalization
-normalized = (W + lora_update) / ||W + lora_update||
-output = magnitude * normalized
+# 2. Hybrid Blending (Learnable \beta)
+# Balances structural capacity (DoRA) with relaxation (LoRA)
+beta = sigmoid(residual_weight)
+output_dora = magnitude * dora_norm
+output_lora = W + lora_update
 
-# Position-aware scaling
-output = output * (1 + position_scale)
+output = (1 - beta) * output_dora + beta * output_lora
+
+# 3. Position & Landmark Scaling
+output = output * (1 + position_scale(pos)) + landmark_summary
 ```
 
 **Parameters per layer**:
@@ -87,18 +98,46 @@ model = HyLoRADAModel(base_model, config)
 
 ## 4. Key Differences from Standard Methods
 
-| Method | Scaling | Magnitude | Position | Params/Layer |
-|--------|---------|-----------|----------|--------------|
+| Method | Scaling | Magnitude | Position | Landmark | Params/Layer |
+|--------|---------|-----------|----------|----------|--------------|
 | LoRA | α/r | - | - | ~87K |
 | rsLoRA | α/√r | - | - | ~87K |
-| DoRA | α/r | ✓ | - | ~91K |
-| **HyLoRADA** | **α/√r** | **✓** | **✓** | **~91K** |
+| DoRA | α/r | ✓ | - | - | ~91K |
+| **HyLoRADA** | **α/√r** | **✓ (Gated)** | **✓** | **✓** | **~105K** |
 
 ## 5. Expected Benefits
 
 1. **Better high-rank performance**: rsLoRA enables effective use of r=16, 32, 64
 2. **Improved accuracy**: DoRA magnitude decomposition approaches full fine-tuning
 3. **Position awareness**: Mitigates lost-in-middle effects with minimal overhead
+
+## 6. Time Complexity Analysis
+    
+| Method | Training Complexity (per token) | Inference Overhead (Merged) | Inference Overhead (Dynamic) |
+| :--- | :--- | :--- | :--- |
+| **Full Fine-Tuning** | $O(d_{in} \cdot d_{out})$ | **Zero** | - |
+| **Sparse Adapter** | $O(r_{ad} \cdot (d_{in} + d_{out}))$ | **High** (Cannot merge) | - |
+| **LongLoRA** | Same as LoRA | **Zero** | Low (S²-Attn overhead) |
+| **LoRA** | $O(r \cdot (d_{in} + d_{out}))$ | **Zero** | - |
+| **DoRA** | $O(r \cdot (d_{in} + d_{out})) + O(d_{out})$ | **Zero** | - |
+| **HyLoRADA** | $O(r \cdot (d_{in} + d_{out})) + O(d_{out})$ | **Zero** (Linear components) | Low (Position/Landmark) |
+
+### 6.1 Training
+- **Full Fine-Tuning**: Most expensive. Updates all parameters ($d \times d$), requiring massive optimizer memory.
+- **LoRA / LongLoRA**: Efficient. Updates only low-rank matrices ($r \ll d$). LongLoRA further reduces self-attention complexity from $O(L^2)$ to $O(L \cdot G)$ via S²-Attn.
+- **Sparse Adapters**: Efficient updates, but introduces parameter inefficiency due to separate adapter modules.
+- **DoRA**: Adds slight overhead for weight normalization (calculating column norms).
+- **HyLoRADA**: Hybrid blend maintains efficient graph size roughly equal to DoRA.
+
+### 6.2 Inference
+- **Merged Weights (Zero Overhead)**: FFT, LoRA, LongLoRA, DoRA, and HyLoRADA (linear parts) can all represent the final model as a single weight matrix $W' = W + \Delta W$.
+- **Non-Mergeable (High Overhead)**: **Sparse Adapters** contain non-linearities (ReLU/GELU) between down/up projections, preventing merging. This adds latency $O(r \cdot d)$ to *every* forward pass.
+- **Dynamic Components (Low Overhead)**:
+    - **Position Bias (HyLoRADA)**: $O(1)$ scalar op per token.
+    - **LandmarkLoRA**: $O(K \cdot d)$ for $K$ landmarks.
+    - **S²-Attn (LongLoRA)**: Requires shifting/masking operations, adding minor overhead vs standard FlashAttention.
+    
+**Conclusion**: HyLoRADA provides advanced capabilities (long-context handling, stability) with virtually no inference latency penalty over standard models.
 
 ## References
 

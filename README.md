@@ -1,6 +1,6 @@
 # HyLoRADA: Hybrid Low-Rank Adaptation
 
-**rsLoRA + DoRA** — Parameter-efficient fine-tuning combining rank-stabilized scaling with weight-decomposed magnitude normalization.
+**rsLoRA + DoRA + Hybrid Blend** — Parameter-efficient fine-tuning combining rank-stabilized scaling, DoRA magnitude normalization, and a learnable hybrid blend for optimal stability.
 
 ## Architecture
 
@@ -9,8 +9,9 @@
 | **rsLoRA** | α/√r scaling for gradient stability | 0 | [Kalajdzievski 2024] |
 | **DoRA** | Weight magnitude decomposition | ~86K/layer | [Liu et al. 2024] |
 | **Position Bias** | Log-bucketed position awareness | 64 shared | [Liu et al. 2023] |
+| **LandmarkLoRA** | Learnable context summary tokens | ~14K | [Novel] |
 
-**Total**: ~100K trainable params per LoRA layer
+**Total**: ~105K trainable params per LoRA layer (extremely efficient)
 
 ## Quick Start
 

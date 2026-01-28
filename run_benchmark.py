@@ -135,11 +135,11 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
         # Use Salesforce wikitext-103 (long articles)
         try:
             dataset = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1")
-            texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 2000]
-            print(f"    Found {len(texts)} long articles (>2000 chars)")
+            texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 10000]
+            print(f"    Found {len(texts)} long articles (>10000 chars)")
             train_texts = texts[:num_train]
             test_texts = texts[num_train:num_train + num_test]
-            print(f"    Dataset: WikiText-103 (long context)")
+            print(f"    Dataset: WikiText-103 (long context >10k)")
         except Exception as e:
             print(f"    Warning: WikiText-103 failed ({e})")
             return load_dataset_by_name("wikitext", num_train, num_test, max_length)
@@ -200,7 +200,7 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark PEFT Methods")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2-0.5B")
+    parser.add_argument("--model", type=str, default="openai-community/gpt2")
     parser.add_argument("--max_length", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=1)
@@ -240,6 +240,15 @@ def main():
     
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+    # Define target modules based on model family
+    is_gpt2 = "gpt2" in args.model.lower()
+    if is_gpt2:
+        target_modules = ("c_attn", "c_proj")
+        print(f"Detected GPT-2 model. Using target modules: {target_modules}")
+    else:
+        target_modules = ("q_proj", "k_proj", "v_proj", "o_proj")
+        print(f"Detected LLaMA/Qwen model. Using target modules: {target_modules}")
     
     print("=" * 70)
     print("PEFT Methods Benchmark")
@@ -303,7 +312,7 @@ def main():
                 from hylorada.lora import apply_dora_to_model
                 apply_dora_to_model(
                     base_model,
-                    target_modules=("q_proj", "k_proj", "v_proj", "o_proj"),
+                    target_modules=target_modules,
                     rank=args.lora_rank,
                     alpha=args.lora_rank * 2,
                 )
@@ -341,7 +350,8 @@ def main():
                     lora_dropout=0.01,
                     # daa_enabled merged into position_bias_enabled (default True)
                     # sparse_enabled removed (not implemented)
-                    s2_attn_enabled=False,  # Disabled: GQA incompatible
+                    s2_attn_enabled=args.s2_attn,  # Allow enabling if flag is set (Works on GPT-2)
+    
                     landmark_enabled=True,  # Enable LandmarkLoRA for better context summary
                     max_sequence_length=args.max_length,
                     train_embeddings=args.train_embeddings,
