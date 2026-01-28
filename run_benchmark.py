@@ -135,11 +135,21 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
         # Use Salesforce wikitext-103 (long articles)
         try:
             dataset = load_dataset("Salesforce/wikitext", "wikitext-103-raw-v1")
-            texts = [t for t in dataset["train"]["text"] if len(t.strip()) > 10000]
-            print(f"    Found {len(texts)} long articles (>10000 chars)")
+            # Concatenate all text
+            print("    Concatenating texts for long context...")
+            all_text = "\n\n".join([t for t in dataset["train"]["text"] if len(t.strip()) > 0])
+            
+            # Create chunks (approximate by chars, assuming 4 chars/token)
+            chunk_size = max_length * 4
+            texts = [all_text[i:i + chunk_size] for i in range(0, len(all_text), chunk_size)]
+            
+            # Limit number of samples to avoid excessive memory
+            texts = texts[:num_train + num_test]
+            
+            print(f"    Created {len(texts)} chunks of ~{chunk_size} chars")
             train_texts = texts[:num_train]
             test_texts = texts[num_train:num_train + num_test]
-            print(f"    Dataset: WikiText-103 (long context >10k)")
+            print(f"    Dataset: WikiText-103 (concatenated & chunked)")
         except Exception as e:
             print(f"    Warning: WikiText-103 failed ({e})")
             return load_dataset_by_name("wikitext", num_train, num_test, max_length)
@@ -196,6 +206,35 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
         raise ValueError(f"Unknown dataset: {dataset_name}")
     
     return train_texts, test_texts
+
+
+def extend_gpt2_context(model, new_length):
+    """Resize GPT-2 position embeddings to support longer context."""
+    # Check if this is GPT-2 architecture
+    if not hasattr(model, "transformer") or not hasattr(model.transformer, "wpe"):
+        return
+    
+    old_wpe = model.transformer.wpe
+    old_len, dim = old_wpe.weight.shape
+    
+    if new_length <= old_len:
+        return
+
+    print(f"  Extending GPT-2 WPE: {old_len} -> {new_length}")
+    new_wpe = nn.Embedding(new_length, dim)
+    
+    # Copy existing weights and initialize new ones
+    with torch.no_grad():
+        new_wpe.weight[:old_len] = old_wpe.weight
+        # Initialize rest with small noise
+        new_wpe.weight[old_len:].normal_(mean=0.0, std=0.02)
+        
+    model.transformer.wpe = new_wpe
+    model.config.n_positions = new_length
+    
+    # Ensure device matches
+    if hasattr(model, "device"):
+        model.transformer.wpe.to(model.device)
 
 
 def main():
@@ -296,6 +335,10 @@ def main():
             print("  Loading fresh model...")
             base_model = load_fresh_model(args.model, device, dtype)
             
+            # Extend context for GPT-2 if needed
+            if "gpt2" in args.model.lower() and args.max_length > 1024:
+                extend_gpt2_context(base_model, args.max_length)
+                
             if method == "baseline":
                 model = base_model
                 train_time = 0
