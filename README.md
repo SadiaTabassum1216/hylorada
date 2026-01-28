@@ -19,8 +19,8 @@
 from transformers import AutoModelForCausalLM
 from hylorada import HyLoRADAConfig, HyLoRADAModel
 
-# Load base model
-base_model = AutoModelForCausalLM.from_pretrained("Qwen/Qwen2-0.5B")
+# Load base model (GPT-2 recommends for S²-Attn)
+base_model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2")
 
 # Apply HyLoRADA (rsLoRA + DoRA + Position Bias)
 config = HyLoRADAConfig(
@@ -37,11 +37,11 @@ model.print_trainable_params()
 ## Benchmark
 
 ```bash
-# Compare methods
-python run_benchmark.py --methods lora dora hylorada --epochs 3
+# Compare methods (GPT-2, 1024 context)
+python run_benchmark.py --model openai-community/gpt2 --methods lora dora hylorada --epochs 3
 
-# Long-context with S²-Attn
-python run_benchmark.py --methods hylorada --s2_attn --max_length 4096
+# Long-context with S²-Attn (GPT-2, 4096 context)
+python run_benchmark.py --model openai-community/gpt2 --methods hylorada --s2_attn --max_length 4096
 ```
 
 ## Configuration

@@ -198,46 +198,30 @@ def load_checkpoint(model, checkpoint_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate comparison examples")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B")
-    parser.add_argument("--checkpoint_dir", type=str, default="./benchmark_results",
-                        help="Directory containing trained checkpoints")
-    parser.add_argument("--lora_rank", type=int, default=16)
-    parser.add_argument("--output", type=str, default="comparison_examples.md")
-    args = parser.parse_args()
+    parser.add_argument("--model", type=str, default="openai-community/gpt2")
+    # ... (skipping unchanged args)
     
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
-    
-    print("Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    
-    print("Creating models for comparison...")
-    models = {}
-    
-    # Check for available checkpoints
-    import os
-    checkpoint_files = {
-        "LoRA": os.path.join(args.checkpoint_dir, "lora_checkpoint.pt"),
-        "DoRA": os.path.join(args.checkpoint_dir, "dora_checkpoint.pt"),
-        "HyLoRADA": os.path.join(args.checkpoint_dir, "hylorada_checkpoint.pt"),
-    }
-    
+    # ...
+
     for name, ckpt_path in checkpoint_files.items():
         if os.path.exists(ckpt_path):
-            print(f"  Loading {name} from checkpoint: {ckpt_path}")
-            
-            # Create fresh base model
-            base_model = AutoModelForCausalLM.from_pretrained(
-                args.model, torch_dtype=dtype, trust_remote_code=True
-            ).to(device)
-            
+            # ... 
+
+            # Determine target modules
+            if "gpt2" in args.model.lower():
+                target_modules = ("c_attn", "c_proj")
+            else:
+                target_modules = ("q_proj", "v_proj")
+
             # Apply appropriate adapter
             if name == "LoRA":
                 model = StandardLoRA(base_model, BaselineConfig(lora_rank=args.lora_rank))
             elif name == "DoRA":
-                base_model, _ = apply_dora_to_model(base_model, rank=args.lora_rank)
+                base_model, _ = apply_dora_to_model(
+                    base_model, 
+                    rank=args.lora_rank,
+                    target_modules=target_modules
+                )
                 model = base_model
             else:  # HyLoRADA
                 from hylorada import HyLoRADAConfig, HyLoRADAModel

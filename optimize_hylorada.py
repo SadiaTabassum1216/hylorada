@@ -181,7 +181,7 @@ def objective(trial: Trial, args) -> float:
 
 def main():
     parser = argparse.ArgumentParser(description="HyLoRADA Hyperparameter Optimization")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-0.5B",
+    parser.add_argument("--model", type=str, default="openai-community/gpt2",
                         help="Base model name")
     parser.add_argument("--n_trials", type=int, default=20,
                         help="Number of optimization trials")
