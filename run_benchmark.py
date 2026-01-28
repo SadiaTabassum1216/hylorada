@@ -339,7 +339,10 @@ def main():
                     lora_rank=args.lora_rank,
                     lora_alpha=args.lora_rank * 3,
                     lora_dropout=0.01,
-                    s2_attn_enabled=args.s2_attn,
+                    daa_enabled=True,
+                    sparse_enabled=False,
+                    s2_attn_enabled=False,  # Disabled: GQA incompatible
+                    landmark_enabled=True,  # Enable LandmarkLoRA for better context summary
                     max_sequence_length=args.max_length,
                     train_embeddings=args.train_embeddings,
                     train_norms=args.train_norms,
