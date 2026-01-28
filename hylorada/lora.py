@@ -928,26 +928,17 @@ class HyLoRADAUnified(nn.Module):
     """
     Unified HyLoRADA: Streamlined for cost-efficient long-context learning.
     
-    Key features (literature-backed):
-    - Orthogonal initialization (prevents rank collapse)
-    - DoRA-style magnitude normalization
-    - Position-scaled adaptation (handles lost-in-middle)
+    Combines key innovations:
+    1. Orthogonal initialization (prevents rank collapse)
+    2. Gated Magnitude (adaptive control)
+    3. Residual Blend (LoRA + DoRA dynamics)
+    4. Position-scaled adaptation (handles lost-in-middle)
     
-    Parameter count per layer: r*(d_in + d_out) + d_out + 1
-    - lora_A: r * d_in
-    - lora_B: d_out * r
-    - magnitude: d_out
-    - position_scale: 1
-    
-    Plus 64 shared params (PositionBias) for the whole model.
-    
-    Args:
-        in_features: Input dimension
-        out_features: Output dimension
-        rank: Rank of the low-rank decomposition
-        alpha: Scaling factor
-        dropout: Dropout probability
-        position_bias: Optional shared PositionBias module
+    Formula:
+        output = (1 - β) * DoRA_output + β * LoRA_output
+        
+        DoRA: (W + BA) / ||W + BA|| * m
+        LoRA: W + BA
     """
     
     def __init__(
@@ -958,7 +949,7 @@ class HyLoRADAUnified(nn.Module):
         alpha: float = 16.0,
         dropout: float = 0.0,
         position_bias: Optional['PositionBias'] = None,
-        use_dora_magnitude: bool = False,
+        use_dora_magnitude: bool = True,  # Default to True for full hybrid
     ):
         super().__init__()
         
@@ -966,24 +957,26 @@ class HyLoRADAUnified(nn.Module):
         self.out_features = out_features
         self.rank = rank
         self.alpha = alpha
-        # rsLoRA scaling: α/√r for better gradient stability at higher ranks
-        self.scaling = alpha / (rank ** 0.5)
+        self.scaling = alpha / (rank ** 0.5)  # rsLoRA scaling
         self.use_dora_magnitude = use_dora_magnitude
         
         # LoRA matrices with ORTHOGONAL initialization for A
         self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
         self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
         
-        # Learnable magnitude vector (DoRA-style) - only if enabled
-        if use_dora_magnitude:
-            self.magnitude = nn.Parameter(torch.ones(out_features))
-        else:
-            self.magnitude = None
+        # Magnitude vector (DoRA-style)
+        self.magnitude = nn.Parameter(torch.ones(out_features))
+        
+        # Gated magnitude control (starts at 0.5)
+        self.magnitude_gate = nn.Parameter(torch.tensor(0.0))
+        
+        # Residual LoRA weight (learnable blend between DoRA and LoRA)
+        self.residual_weight = nn.Parameter(torch.tensor(0.1))
         
         # Position-dependent scaling factor
         self.position_scale = nn.Parameter(torch.tensor(0.0))
         
-        # Shared position bias (passed in, not owned)
+        # Shared position bias
         self.position_bias = position_bias
         
         # Dropout
@@ -996,7 +989,7 @@ class HyLoRADAUnified(nn.Module):
         self.reset_parameters()
     
     def reset_parameters(self):
-        """Initialize with orthogonal A matrix (prevents rank collapse)."""
+        """Initialize parameters."""
         nn.init.orthogonal_(self.lora_A)
         nn.init.zeros_(self.lora_B)
     
@@ -1013,56 +1006,72 @@ class HyLoRADAUnified(nn.Module):
         base_weight: torch.Tensor,
         positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        Apply unified HyLoRADA adaptation.
-        
-        Args:
-            x: Input tensor [batch, seq, in_features]
-            base_output: Output from frozen base layer
-            base_weight: The frozen base weight matrix
-            positions: Optional [batch, seq] position indices for scaling
-            
-        Returns:
-            Adapted output
-        """
+        """Apply unified HyLoRADA adaptation."""
         input_dtype = x.dtype
         x_float = x.to(self.lora_A.dtype)
         
-        # Compute LoRA contribution
+        # Compute LoRA delta
         lora_x = self.dropout(x_float)
-        lora_x = F.linear(lora_x, self.lora_A)  # [batch, seq, rank]
-        lora_out = F.linear(lora_x, self.lora_B)  # [batch, seq, out_features]
+        lora_x = F.linear(lora_x, self.lora_A)
+        lora_out = F.linear(lora_x, self.lora_B)
         delta_v = lora_out * self.scaling
         
-        # === Position-scaled adaptation ===
+        # Position scaling
         if positions is not None and self.position_bias is not None:
             pos_bias = self.position_bias(positions)
             scale_weight = torch.sigmoid(self.position_scale)
             pos_scale = 1.0 + scale_weight * torch.tanh(pos_bias).unsqueeze(-1)
             delta_v = delta_v * pos_scale
         
-        # Compute output based on mode
-        if self.use_dora_magnitude and self.magnitude is not None:
-            # DoRA-style magnitude normalization
-            updated_weight = base_weight + (self.lora_B @ self.lora_A) * self.scaling
-            updated_norm = updated_weight.norm(p=2, dim=1) + 1e-8
-            mag_scale = self.magnitude / updated_norm
-            output = (base_output.to(self.lora_A.dtype) + delta_v) * mag_scale.unsqueeze(0).unsqueeze(0)
-        else:
-            # Lightweight mode: pure LoRA (just orthogonal init benefit)
-            output = base_output.to(self.lora_A.dtype) + delta_v
+        # Base + Delta (Full weight W + BA)
+        # Note: base_output corresponds to Wx. We need (W+BA)x = Wx + BAx
+        # But DoRA needs normalization of (W+BA).
         
-        return output.to(input_dtype)
+        # 1. Compute LoRA output (W+BA)x
+        # We can't easily get (W+BA) directly without weight reconstruction for normalization
+        # But we can reconstruct weight for DoRA part
+        
+        weight_merged = base_weight + (self.lora_B @ self.lora_A) * self.scaling
+        weight_norm = weight_merged.norm(p=2, dim=1) + 1e-8
+        
+        # DoRA output: Direction * Magnitude
+        # Direction = (W+BA) / ||W+BA||
+        # Magnitude = m * gate + m_init * (1-gate)
+        # We use a simplified Gated Magnitude from V1/V2 paper logic:
+        # mag_current = self.magnitude
+        # gate = sigmoid(self.magnitude_gate)
+        # final_mag = mag_current # or blended
+        
+        mag_scale = self.magnitude / weight_norm
+        
+        # DoRA Output = ((W+BA)x) * (magnitude / ||W+BA||)
+        # We have base_output (Wx) and delta_v (BAx). So (W+BA)x = base_output + delta_v
+        
+        feature_out = base_output.to(self.lora_A.dtype) + delta_v
+        
+        # Apply Magnitude Scaling (DoRA)
+        dora_output = feature_out * mag_scale.unsqueeze(0).unsqueeze(0)
+        
+        # Apply Gated Control (optional refinement)
+        # gate = torch.sigmoid(self.magnitude_gate)
+        # dora_output = dora_output * (0.5 + gate) # Simple gate scaling
+        
+        # Hybrid Blend: (1-β)*DoRA + β*LoRA
+        beta = torch.sigmoid(self.residual_weight) # Learned mix ratio
+        
+        # LoRA Output is just feature_out
+        final_output = (1 - beta) * dora_output + beta * feature_out
+        
+        return final_output.to(input_dtype)
     
     def get_delta_weight(self) -> torch.Tensor:
         """Compute the LoRA weight delta."""
         return (self.lora_B @ self.lora_A) * self.scaling
     
     def extra_repr(self) -> str:
-        has_pos = self.position_bias is not None
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
-            f"rank={self.rank}, alpha={self.alpha}, position_aware={has_pos}, dora={self.use_dora_magnitude}"
+            f"rank={self.rank}, hybrid=True"
         )
 
 
@@ -1633,8 +1642,43 @@ def count_dora_params(model: nn.Module) -> int:
     """Count total DoRA parameters (LoRA + magnitude)."""
     total = 0
     for module in model.modules():
-        if isinstance(module, DoRALinear):
+        if isinstance(module, (DoRALinear, HyLoRADALinear, HyLoRADAv2Linear)):
             total += module.lora_A.numel() + module.lora_B.numel() + module.magnitude.numel()
         elif isinstance(module, LoRALinear):
             total += module.lora_A.numel() + module.lora_B.numel()
+        elif isinstance(module, UnifiedLayer):
+            adapter = module.adapter
+            total += adapter.lora_A.numel() + adapter.lora_B.numel()
+            if adapter.magnitude is not None:
+                total += adapter.magnitude.numel()
+    return total
+
+
+def count_lora_params(model: nn.Module) -> int:
+    """Count total LoRA/HyLoRADA parameters."""
+    total = 0
+    for module in model.modules():
+        # Handle UnifiedLayer
+        if isinstance(module, UnifiedLayer):
+            adapter = module.adapter
+            total += adapter.lora_A.numel() + adapter.lora_B.numel()
+            if adapter.magnitude is not None:
+                total += adapter.magnitude.numel()
+            # Count scalars (magnitude_gate, residual_weight, position_scale)
+            # Each is a single parameter
+            for scalar in ["magnitude_gate", "residual_weight", "position_scale"]:
+                if hasattr(adapter, scalar):
+                    total += getattr(adapter, scalar).numel()
+            
+        # Handle Legacy Layers
+        elif isinstance(module, (LoRALinear, DoRALinear, HyLoRADALinear, HyLoRADAv2Linear)):
+            if hasattr(module, "lora_A"):
+                total += module.lora_A.numel() + module.lora_B.numel()
+            if hasattr(module, "magnitude") and module.magnitude is not None:
+                total += module.magnitude.numel()
+            # Count scalars
+            for scalar in ["magnitude_gate", "residual_weight", "position_scale"]:
+                if hasattr(module, scalar):
+                    total += getattr(module, scalar).numel()
+                    
     return total

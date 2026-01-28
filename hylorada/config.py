@@ -62,9 +62,9 @@ class HyLoRADAConfig:
     s2_group_size: int = 2048
     s2_shift_ratio: float = 0.5
     
-    # ============ LandmarkLoRA Settings (Novel) ============
-    # Trainable landmark tokens for context summarization
-    landmark_enabled: bool = True
+    # ============ LandmarkLoRA Settings (Experimental) ============
+    # Disabled: single-point application interferes with LoRA
+    landmark_enabled: bool = False
     num_landmarks: int = 8  # Number of learnable context summary tokens
     
     # ============ Training Settings ============
