@@ -339,8 +339,8 @@ def main():
                     lora_rank=args.lora_rank,
                     lora_alpha=args.lora_rank * 3,
                     lora_dropout=0.01,
-                    daa_enabled=True,
-                    sparse_enabled=False,
+                    # daa_enabled merged into position_bias_enabled (default True)
+                    # sparse_enabled removed (not implemented)
                     s2_attn_enabled=False,  # Disabled: GQA incompatible
                     landmark_enabled=True,  # Enable LandmarkLoRA for better context summary
                     max_sequence_length=args.max_length,
