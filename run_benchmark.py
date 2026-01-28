@@ -343,6 +343,9 @@ def main():
             # Extend context for GPT-2 if needed
             if "gpt2" in args.model.lower() and args.max_length > 1024:
                 extend_gpt2_context(base_model, args.max_length)
+            
+            # Ensure base model is in correct dtype (critical for evaluation stability)
+            base_model.to(dtype=dtype)
                 
             if method == "baseline":
                 model = base_model
