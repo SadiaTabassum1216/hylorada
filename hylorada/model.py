@@ -164,6 +164,11 @@ class HyLoRADAModel(nn.Module):
             def landmark_hook(module, input, output):
                 # Apply LandmarkLoRA to hidden states
                 if self.state.landmark is not None:
+                    # Ensure dtype compatibility
+                    original_dtype = output.dtype
+                    # Convert landmarks to match output dtype
+                    if self.state.landmark.landmarks.dtype != original_dtype:
+                        self.state.landmark.to(original_dtype)
                     return self.state.landmark(output)
                 return output
             
