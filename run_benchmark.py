@@ -39,11 +39,16 @@ def load_fresh_model(model_name, device, dtype):
 
 
 def train_model(model, tokenizer, train_texts, args, method_name):
-    """Train a model and return training time."""
+    """Train a model and return training time and memory usage."""
     # Ensure model is on correct device and dtype
     device = next(model.parameters()).device
     dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float32
     model.to(device=device, dtype=dtype)
+    
+    # Reset memory stats
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats(device)
+        torch.cuda.empty_cache()
     
     train_dataloader = create_long_context_dataloader(
         dataset=train_texts, tokenizer=tokenizer,
@@ -64,7 +69,17 @@ def train_model(model, tokenizer, train_texts, args, method_name):
     print(f"  Training {method_name}...")
     start = time.time()
     trainer.train()
-    return time.time() - start
+    train_time = time.time() - start
+    
+    # Get memory stats
+    if torch.cuda.is_available():
+        peak_memory = torch.cuda.max_memory_allocated(device) / (1024 ** 3)  # GB
+        current_memory = torch.cuda.memory_allocated(device) / (1024 ** 3)  # GB
+    else:
+        peak_memory = 0.0
+        current_memory = 0.0
+    
+    return train_time, peak_memory, current_memory
 
 
 def evaluate_model(model, tokenizer, test_texts, max_length):
@@ -351,12 +366,14 @@ def main():
                 model = base_model
                 train_time = 0
                 params = 0
+                peak_memory = 0
+                current_memory = 0
                 
             elif method == "lora":
                 model = StandardLoRA(base_model, baseline_config)
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]
-                train_time = train_model(model, tokenizer, train_texts, args, "LoRA")
+                train_time, peak_memory, current_memory = train_model(model, tokenizer, train_texts, args, "LoRA")
             
             elif method == "dora":
                 # DoRA: Using DoRA layers
@@ -391,7 +408,7 @@ def main():
                         return self.model.named_parameters()
                 
                 model = DoRAWrapper(base_model)
-                train_time = train_model(model, tokenizer, train_texts, args, "DoRA")
+                train_time, peak_memory, current_memory = train_model(model, tokenizer, train_texts, args, "DoRA")
             
             elif method == "hylorada":
                 # HyLoRADA Unified: rsLoRA + DoRA + LandmarkLoRA
@@ -415,25 +432,25 @@ def main():
                 
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]
-                train_time = train_model(model, tokenizer, train_texts, args, "HyLoRADA")
+                train_time, peak_memory, current_memory = train_model(model, tokenizer, train_texts, args, "HyLoRADA")
                 
             elif method == "lorada":
                 model = LoRaDAModel(base_model, baseline_config)
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]
-                train_time = train_model(model, tokenizer, train_texts, args, "LoRaDA")
+                train_time, peak_memory, current_memory = train_model(model, tokenizer, train_texts, args, "LoRaDA")
                 
             elif method == "longlora":
                 model = LongLoRAModel(base_model, baseline_config)
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]
-                train_time = train_model(model, tokenizer, train_texts, args, "LongLoRA")
+                train_time, peak_memory, current_memory = train_model(model, tokenizer, train_texts, args, "LongLoRA")
                 
             elif method == "sparse":
                 model = SparseAdapterModel(base_model, baseline_config)
                 model.print_trainable_params()
                 params = model.count_params()["trainable_params"]
-                train_time = train_model(model, tokenizer, train_texts, args, "SparseAdapter")
+                train_time, peak_memory, current_memory = train_model(model, tokenizer, train_texts, args, "SparseAdapter")
             
             else:
                 print(f"  Unknown method: {method}")
@@ -446,10 +463,13 @@ def main():
             results[method] = {
                 "trainable_params": params,
                 "train_time": train_time,
+                "peak_memory_gb": peak_memory,
+                "current_memory_gb": current_memory,
                 **eval_results,
             }
             
-            print(f"  ✓ {method}: PPL={eval_results['perplexity']:.2f}, Params={params:,}, Time={train_time:.1f}s")
+            memory_str = f", Mem={peak_memory:.2f}GB" if torch.cuda.is_available() else ""
+            print(f"  ✓ {method}: PPL={eval_results['perplexity']:.2f}, Params={params:,}, Time={train_time:.1f}s{memory_str}")
             
             # Save checkpoint for qualitative analysis
             checkpoint_path = os.path.join(args.output_dir, f"{method}_checkpoint.pt")
@@ -474,11 +494,14 @@ def main():
             results[method] = {"error": str(e)}
     
     # Summary
-    print("\n" + "=" * 70)
+    print("\n" + "=" * 80)
     print("RESULTS SUMMARY")
-    print("=" * 70)
-    print(f"{'Method':<12} {'Params':>12} {'Time':>10} {'PPL':>10} {'LiM PPL':>10}")
-    print("-" * 70)
+    print("=" * 80)
+    if torch.cuda.is_available():
+        print(f"{'Method':<12} {'Params':>12} {'Mem(GB)':>10} {'Time':>10} {'PPL':>10} {'LiM PPL':>10}")
+    else:
+        print(f"{'Method':<12} {'Params':>12} {'Time':>10} {'PPL':>10} {'LiM PPL':>10}")
+    print("-" * 80)
     
     for method, r in results.items():
         if "error" in r:
@@ -488,9 +511,13 @@ def main():
             time_s = f"{r['train_time']:.1f}s" if r['train_time'] else "-"
             ppl = f"{r['perplexity']:.2f}"
             lim = f"{r['lim_perplexity']:.2f}"
-            print(f"{method:<12} {params:>12} {time_s:>10} {ppl:>10} {lim:>10}")
+            if torch.cuda.is_available():
+                mem = f"{r.get('peak_memory_gb', 0):.2f}"
+                print(f"{method:<12} {params:>12} {mem:>10} {time_s:>10} {ppl:>10} {lim:>10}")
+            else:
+                print(f"{method:<12} {params:>12} {time_s:>10} {ppl:>10} {lim:>10}")
     
-    print("=" * 70)
+    print("=" * 80)
     
     # Save results
     os.makedirs(args.output_dir, exist_ok=True)
