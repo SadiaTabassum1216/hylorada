@@ -411,20 +411,19 @@ def main():
                 train_time, peak_memory, current_memory = train_model(model, tokenizer, train_texts, args, "DoRA")
             
             elif method == "hylorada":
-                # HyLoRADA Unified: rsLoRA + DoRA + LandmarkLoRA
+                # HyLoRADA: rsLoRA only (ablation shows other components degrade performance)
                 config = HyLoRADAConfig(
                     lora_rank=args.lora_rank,
-                    lora_alpha=args.lora_rank * 3,
-                    lora_dropout=0.01,
-                    # daa_enabled merged into position_bias_enabled (default True)
-                    # sparse_enabled removed (not implemented)
-                    s2_attn_enabled=args.s2_attn,  # Allow enabling if flag is set (Works on GPT-2)
-    
-                    landmark_enabled=True,  # Enable LandmarkLoRA for better context summary
+                    lora_alpha=args.lora_rank * 2,  # Standard rsLoRA scaling
+                    lora_dropout=0.05,
+                    use_dora_magnitude=False,  # Ablation: DoRA degrades -5.88%
+                    position_bias_enabled=False,  # Ablation: Position bias degrades -3.54%
+                    landmark_enabled=False,  # Ablation: Landmarks degrade -5.19%
+                    s2_attn_enabled=args.s2_attn if args.max_length >= 4096 else False,
                     max_sequence_length=args.max_length,
                     train_embeddings=args.train_embeddings,
                     train_norms=args.train_norms,
-                    s2_sink_tokens=args.sink_tokens,
+                    s2_sink_tokens=args.sink_tokens if args.s2_attn else 0,
                     rope_scaling_type=args.rope_scaling_type,
                     rope_scaling_factor=args.rope_scaling_factor,
                 )
