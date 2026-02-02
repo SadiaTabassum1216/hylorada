@@ -104,30 +104,37 @@ def test_per_layer_landmark(base_model, tokenizer, train_texts, test_texts, args
     landmarks = {}
     num_layers = 0
     
+    # For GPT-2, we want to apply landmarks after each transformer block's output
+    # Not on individual projections like c_proj
     for name, module in model.base_model.named_modules():
-        # Find FFN output layers (varies by architecture)
-        if any(pattern in name.lower() for pattern in ["mlp", "ffn", "feed_forward"]):
-            # Only apply to the final output of FFN
-            if "c_proj" in name or "dense" in name or "down_proj" in name:
-                landmark = PerLayerLandmark(
-                    hidden_size=model.hidden_size,
-                    num_landmarks=args.num_landmarks,
-                    dropout=0.0,
-                )
-                
-                # Register as parameter
-                param_name = name.replace(".", "_") + "_landmark"
-                model.add_module(param_name, landmark)
-                landmarks[name] = landmark
-                num_layers += 1
-                
-                # Hook to apply landmark
-                def make_hook(lm):
-                    def hook(m, input, output):
+        # Target the transformer blocks themselves (e.g., "transformer.h.0", "transformer.h.1", etc.)
+        if "transformer.h." in name and name.count(".") == 2:  # Only the main block level
+            # Get output dimension - should match model hidden size
+            landmark = PerLayerLandmark(
+                hidden_size=model.hidden_size,
+                num_landmarks=args.num_landmarks // 2,  # Use fewer per layer
+                dropout=0.0,
+            )
+            
+            # Register as parameter
+            param_name = name.replace(".", "_") + "_landmark"
+            model.add_module(param_name, landmark)
+            landmarks[name] = landmark
+            num_layers += 1
+            
+            # Hook to apply landmark after the entire block
+            def make_hook(lm):
+                def hook(m, input, output):
+                    # output is a tuple for transformer blocks: (hidden_states, ...)
+                    if isinstance(output, tuple):
+                        hidden_states = output[0]
+                        transformed = lm(hidden_states)
+                        return (transformed,) + output[1:]
+                    else:
                         return lm(output)
-                    return hook
-                
-                module.register_forward_hook(make_hook(landmark))
+                return hook
+            
+            module.register_forward_hook(make_hook(landmark))
     
     print(f"Applied landmarks to {num_layers} layers")
     
