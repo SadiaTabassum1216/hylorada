@@ -887,6 +887,18 @@ class LandmarkLoRA(nn.Module):
     ):
         super().__init__()
         
+        # Input validation
+        if hidden_size <= 0:
+            raise ValueError(f"hidden_size must be positive, got {hidden_size}")
+        if num_landmarks <= 0:
+            raise ValueError(f"num_landmarks must be positive, got {num_landmarks}")
+        if max_positions <= 0:
+            raise ValueError(f"max_positions must be positive, got {max_positions}")
+        if num_buckets <= 0:
+            raise ValueError(f"num_buckets must be positive, got {num_buckets}")
+        if not 0 <= dropout < 1:
+            raise ValueError(f"dropout must be in [0, 1), got {dropout}")
+        
         self.hidden_size = hidden_size
         self.num_landmarks = num_landmarks
         self.max_positions = max_positions
@@ -980,9 +992,22 @@ class HyLoRADAUnified(nn.Module):
         alpha: float = 16.0,
         dropout: float = 0.0,
         position_bias: Optional['PositionBias'] = None,
-        use_dora_magnitude: bool = True,  # Default to True for full hybrid
+        use_dora_magnitude: bool = True,
     ):
         super().__init__()
+        
+        # Input validation
+        if rank <= 0:
+            raise ValueError(f"rank must be positive, got {rank}")
+        if rank > min(in_features, out_features):
+            raise ValueError(
+                f"rank ({rank}) cannot exceed min(in_features, out_features) "
+                f"= {min(in_features, out_features)}"
+            )
+        if alpha <= 0:
+            raise ValueError(f"alpha must be positive, got {alpha}")
+        if not 0 <= dropout < 1:
+            raise ValueError(f"dropout must be in [0, 1), got {dropout}")
         
         self.in_features = in_features
         self.out_features = out_features
@@ -995,14 +1020,13 @@ class HyLoRADAUnified(nn.Module):
         self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
         self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
         
-        # Magnitude vector (DoRA-style)
-        self.magnitude = nn.Parameter(torch.ones(out_features))
-        
-        # Gated magnitude control (starts at 0.5)
-        self.magnitude_gate = nn.Parameter(torch.tensor(0.0))
-        
-        # Residual LoRA weight (learnable blend between DoRA and LoRA)
-        self.residual_weight = nn.Parameter(torch.tensor(0.1))
+        # DoRA magnitude vector (if enabled)
+        if use_dora_magnitude:
+            self.magnitude = nn.Parameter(torch.ones(out_features))
+            self.register_buffer("base_weight_norm", None)
+        else:
+            self.magnitude = None
+            self.base_weight_norm = None
         
         # Position-dependent scaling factor
         self.position_scale = nn.Parameter(torch.tensor(0.0))
@@ -1012,9 +1036,6 @@ class HyLoRADAUnified(nn.Module):
         
         # Dropout
         self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
-        
-        # Cache for base weight norm
-        self.register_buffer("base_weight_norm", None)
         
         # Initialize
         self.reset_parameters()
@@ -1037,63 +1058,42 @@ class HyLoRADAUnified(nn.Module):
         base_weight: torch.Tensor,
         positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Apply unified HyLoRADA adaptation."""
+        """
+        Apply unified HyLoRADA adaptation.
+        
+        Combines rsLoRA (rank-stabilized scaling) with optional DoRA magnitude decomposition
+        and position-aware scaling for long-context learning.
+        """
         input_dtype = x.dtype
         x_float = x.to(self.lora_A.dtype)
         
-        # Compute LoRA delta
+        # Compute LoRA delta with rsLoRA scaling (α/√r)
         lora_x = self.dropout(x_float)
-        lora_x = F.linear(lora_x, self.lora_A)
-        lora_out = F.linear(lora_x, self.lora_B)
+        lora_x = F.linear(lora_x, self.lora_A)  # [batch, seq, rank]
+        lora_out = F.linear(lora_x, self.lora_B)  # [batch, seq, out_features]
         delta_v = lora_out * self.scaling
         
-        # Position scaling
+        # Apply position-aware scaling if enabled
         if positions is not None and self.position_bias is not None:
             pos_bias = self.position_bias(positions)
             scale_weight = torch.sigmoid(self.position_scale)
             pos_scale = 1.0 + scale_weight * torch.tanh(pos_bias).unsqueeze(-1)
             delta_v = delta_v * pos_scale
         
-        # Base + Delta (Full weight W + BA)
-        # Note: base_output corresponds to Wx. We need (W+BA)x = Wx + BAx
-        # But DoRA needs normalization of (W+BA).
+        # Compute output: base + delta
+        output = base_output.to(self.lora_A.dtype) + delta_v
         
-        # 1. Compute LoRA output (W+BA)x
-        # We can't easily get (W+BA) directly without weight reconstruction for normalization
-        # But we can reconstruct weight for DoRA part
+        # Apply DoRA magnitude decomposition if enabled
+        if self.use_dora_magnitude and self.magnitude is not None:
+            # Compute merged weight for normalization
+            weight_merged = base_weight + (self.lora_B @ self.lora_A) * self.scaling
+            weight_norm = weight_merged.norm(p=2, dim=1) + 1e-8
+            
+            # Apply magnitude scaling: output * (magnitude / ||W+BA||)
+            mag_scale = self.magnitude / weight_norm
+            output = output * mag_scale.unsqueeze(0).unsqueeze(0)
         
-        weight_merged = base_weight + (self.lora_B @ self.lora_A) * self.scaling
-        weight_norm = weight_merged.norm(p=2, dim=1) + 1e-8
-        
-        # DoRA output: Direction * Magnitude
-        # Direction = (W+BA) / ||W+BA||
-        # Magnitude = m * gate + m_init * (1-gate)
-        # We use a simplified Gated Magnitude from V1/V2 paper logic:
-        # mag_current = self.magnitude
-        # gate = sigmoid(self.magnitude_gate)
-        # final_mag = mag_current # or blended
-        
-        mag_scale = self.magnitude / weight_norm
-        
-        # DoRA Output = ((W+BA)x) * (magnitude / ||W+BA||)
-        # We have base_output (Wx) and delta_v (BAx). So (W+BA)x = base_output + delta_v
-        
-        feature_out = base_output.to(self.lora_A.dtype) + delta_v
-        
-        # Apply Magnitude Scaling (DoRA)
-        dora_output = feature_out * mag_scale.unsqueeze(0).unsqueeze(0)
-        
-        # Apply Gated Control (optional refinement)
-        # gate = torch.sigmoid(self.magnitude_gate)
-        # dora_output = dora_output * (0.5 + gate) # Simple gate scaling
-        
-        # Hybrid Blend: (1-β)*DoRA + β*LoRA
-        beta = torch.sigmoid(self.residual_weight) # Learned mix ratio
-        
-        # LoRA Output is just feature_out
-        final_output = (1 - beta) * dora_output + beta * feature_out
-        
-        return final_output.to(input_dtype)
+        return output.to(input_dtype)
     
     def get_delta_weight(self) -> torch.Tensor:
         """Compute the LoRA weight delta."""

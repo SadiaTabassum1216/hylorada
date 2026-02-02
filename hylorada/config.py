@@ -6,6 +6,9 @@ Simplified configuration for the unified HyLoRADA architecture.
 
 from dataclasses import dataclass, field
 from typing import List, Tuple, Optional
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -85,11 +88,59 @@ class HyLoRADAConfig:
     rope_scaling_factor: float = 1.0
     
     def __post_init__(self):
-        """Validate configuration."""
-        if self.lora_rank < 1:
-            raise ValueError(f"lora_rank must be >= 1, got {self.lora_rank}")
-        if not 0 < self.s2_shift_ratio <= 1.0:
-            raise ValueError(f"s2_shift_ratio must be in (0, 1], got {self.s2_shift_ratio}")
+        """Validate configuration parameters."""
+        # Validate LoRA settings
+        if self.lora_rank <= 0:
+            raise ValueError(f"lora_rank must be positive, got {self.lora_rank}")
+        if self.lora_alpha <= 0:
+            raise ValueError(f"lora_alpha must be positive, got {self.lora_alpha}")
+        if not 0 <= self.lora_dropout < 1:
+            raise ValueError(f"lora_dropout must be in [0, 1), got {self.lora_dropout}")
+        
+        # Validate landmark settings
+        if self.landmark_enabled:
+            if self.num_landmarks <= 0:
+                raise ValueError(f"num_landmarks must be positive, got {self.num_landmarks}")
+            if self.num_position_buckets <= 0:
+                raise ValueError(f"num_position_buckets must be positive, got {self.num_position_buckets}")
+        
+        # Validate position bias settings
+        if self.position_bias_enabled and self.position_num_buckets <= 0:
+            raise ValueError(f"position_num_buckets must be positive, got {self.position_num_buckets}")
+        
+        # Validate S²-Attn settings
+        if self.s2_attn_enabled:
+            if self.s2_group_size <= 0:
+                raise ValueError(f"s2_group_size must be positive, got {self.s2_group_size}")
+            if not 0 < self.s2_shift_ratio <= 1.0:
+                raise ValueError(f"s2_shift_ratio must be in (0, 1], got {self.s2_shift_ratio}")
+            logger.warning(
+                "S²-Attn is enabled. Ensure your model uses Grouped Query Attention (GQA) "
+                "or Multi-Head Attention (MHA). Flash Attention variants may not be compatible."
+            )
+        
+        # Validate RoPE scaling
+        if self.rope_scaling_type is not None:
+            valid_types = ["linear", "dynamic", "yarn"]
+            if self.rope_scaling_type not in valid_types:
+                raise ValueError(
+                    f"rope_scaling_type must be one of {valid_types}, got {self.rope_scaling_type}"
+                )
+            if self.rope_scaling_factor <= 1.0:
+                logger.warning(
+                    f"rope_scaling_factor is {self.rope_scaling_factor}, which won't extend context. "
+                    "Use values > 1.0 for context extension (e.g., 2.0 for 2x, 4.0 for 4x)."
+                )
+        
+        # Validate mixed precision
+        if self.mixed_precision not in ["fp16", "bf16", "fp32"]:
+            raise ValueError(
+                f"mixed_precision must be 'fp16', 'bf16', or 'fp32', got {self.mixed_precision}"
+            )
+        
+        # Validate sequence length
+        if self.max_sequence_length <= 0:
+            raise ValueError(f"max_sequence_length must be positive, got {self.max_sequence_length}")
     
     def get_component_status(self) -> dict:
         """Return enabled/disabled status of each component."""
