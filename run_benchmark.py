@@ -411,14 +411,19 @@ def main():
                 train_time, peak_memory, current_memory = train_model(model, tokenizer, train_texts, args, "DoRA")
             
             elif method == "hylorada":
-                # HyLoRADA: rsLoRA only (ablation shows other components degrade performance)
+                # HyLoRADA: Context-length adaptive configuration
+                # Short context (<1K): rsLoRA only
+                # Long context (4K+): Enable position bias + landmarks
+                is_long_context = args.max_length >= 2048
+                
                 config = HyLoRADAConfig(
                     lora_rank=args.lora_rank,
                     lora_alpha=args.lora_rank * 2,  # Standard rsLoRA scaling
                     lora_dropout=0.05,
-                    use_dora_magnitude=False,  # Ablation: DoRA degrades -5.88%
-                    position_bias_enabled=False,  # Ablation: Position bias degrades -3.54%
-                    landmark_enabled=False,  # Ablation: Landmarks degrade -5.19%
+                    use_dora_magnitude=False,  # Ablation: DoRA degrades on short context
+                    position_bias_enabled=is_long_context,  # Enable for long context only
+                    landmark_enabled=is_long_context,  # Enable for long context only
+                    num_landmarks=8 if is_long_context else 0,
                     s2_attn_enabled=args.s2_attn if args.max_length >= 4096 else False,
                     max_sequence_length=args.max_length,
                     train_embeddings=args.train_embeddings,
@@ -427,6 +432,8 @@ def main():
                     rope_scaling_type=args.rope_scaling_type,
                     rope_scaling_factor=args.rope_scaling_factor,
                 )
+                
+                print(f"  Config: long_context={is_long_context}, position_bias={is_long_context}, landmarks={is_long_context}")
                 model = HyLoRADAModel(base_model, config)
                 
                 model.print_trainable_params()
