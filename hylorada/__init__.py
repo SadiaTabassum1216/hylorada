@@ -12,13 +12,10 @@ from hylorada.lora import (
     apply_unified_to_model,
 )
 
-# Landmark redesigns (experimental)
+# Landmark redesigns (experimental - for testing)
 from hylorada.landmark_redesigns import (
-    PerLayerLandmark,
-    AttentionIntegratedLandmark,
     PositionAdaptiveLandmark,
-    apply_per_layer_landmarks,
-    apply_attention_landmarks,
+    count_landmark_params,
 )
 
 # Legacy & baselines (for comparison)

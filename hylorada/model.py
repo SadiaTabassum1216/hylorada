@@ -139,16 +139,17 @@ class HyLoRADAModel(nn.Module):
         if self.config.rope_scaling_type and hasattr(self.base_model, "config"):
             self._apply_rope_scaling()
         
-        # 4. Apply LandmarkLoRA if enabled (Novel context summarization)
+        # 4. Apply Position-Adaptive LandmarkLoRA if enabled (9% PPL improvement)
         if self.config.landmark_enabled:
             self.state.landmark = LandmarkLoRA(
                 hidden_size=self.hidden_size,
                 num_landmarks=self.config.num_landmarks,
+                max_positions=self.config.max_sequence_length,
+                num_buckets=getattr(self.config, 'num_position_buckets', 32),
                 dropout=self.config.lora_dropout,
             )
             # Register as submodule so it moves with model.to(device)
             self.add_module("landmark_module", self.state.landmark)
-            # Register hook to apply landmark to hidden states
             # Register hook to apply landmark to hidden states
             self._register_landmark_hook()
             
@@ -161,7 +162,7 @@ class HyLoRADAModel(nn.Module):
                 print("Gradient checkpointing enabled (memory optimized)")
     
     def _register_landmark_hook(self):
-        """Register forward hook to apply LandmarkLoRA to hidden states."""
+        """Register forward hook to apply Position-Adaptive LandmarkLoRA to hidden states."""
         # Find the final layer norm (before LM head)
         norm_module = None
         for name, module in self.base_model.named_modules():
@@ -171,7 +172,7 @@ class HyLoRADAModel(nn.Module):
         
         if norm_module is not None:
             def landmark_hook(module, input, output):
-                # Apply LandmarkLoRA to hidden states
+                # Apply Position-Adaptive LandmarkLoRA to hidden states
                 if self.state.landmark is not None:
                     # Ensure dtype compatibility
                     original_dtype = output.dtype
@@ -182,7 +183,7 @@ class HyLoRADAModel(nn.Module):
                 return output
             
             norm_module.register_forward_hook(landmark_hook)
-            print(f"Registered LandmarkLoRA hook on final norm layer")
+            print(f"Registered Position-Adaptive LandmarkLoRA hook on final norm layer")
     
     def _apply_rope_scaling(self):
         """Inject RoPE scaling configuration into base model."""

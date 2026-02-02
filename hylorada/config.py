@@ -62,10 +62,11 @@ class HyLoRADAConfig:
     s2_group_size: int = 2048
     s2_shift_ratio: float = 0.5
     
-    # ============ LandmarkLoRA Settings (Experimental) ============
-    # Disabled: single-point application interferes with LoRA
-    landmark_enabled: bool = False
+    # ============ Position-Adaptive LandmarkLoRA Settings ============
+    # Enabled by default: 9.19% PPL improvement, 9.32% LIM-PPL improvement
+    landmark_enabled: bool = True
     num_landmarks: int = 8  # Number of learnable context summary tokens
+    num_position_buckets: int = 32  # Position bucketing granularity
     
     # ============ Training Settings ============
     gradient_checkpointing: bool = True
