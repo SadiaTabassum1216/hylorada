@@ -53,7 +53,7 @@ def evaluate_perplexity_simple(model, dataloader, device):
     """Simple perplexity evaluation on a dataloader."""
     model.eval()
     total_loss = 0
-    total_tokens = 0
+    num_batches = 0
     
     with torch.no_grad():
         for batch in dataloader:
@@ -66,12 +66,11 @@ def evaluate_perplexity_simple(model, dataloader, device):
                 labels=input_ids,
             )
             
-            # Weight by number of tokens
-            n_tokens = attention_mask.sum().item()
-            total_loss += outputs.loss.item() * n_tokens
-            total_tokens += n_tokens
+            # outputs.loss is already token-averaged by HuggingFace
+            total_loss += outputs.loss.item()
+            num_batches += 1
     
-    avg_loss = total_loss / total_tokens
+    avg_loss = total_loss / num_batches
     perplexity = torch.exp(torch.tensor(avg_loss)).item()
     
     return perplexity
@@ -157,10 +156,16 @@ def test_baseline(device, dtype, train_loader, val_loader, epochs):
     print("\n" + "="*80)
     print("TEST 1: BASELINE (No Adaptation)")
     print("="*80)
-    print("Configuration: Frozen pretrained model")
+    print("Configuration: Frozen pretrained model (no LoRA)")
     
+    # Create model WITHOUT LoRA by using a dummy config with rank=0
+    # This ensures consistent evaluation path
     base_model = GPT2LMHeadModel.from_pretrained("gpt2")
     base_model.to(device=device, dtype=dtype)
+    
+    # Freeze all parameters to simulate no adaptation
+    for param in base_model.parameters():
+        param.requires_grad = False
     
     # Just evaluate, no training
     base_model.eval()
