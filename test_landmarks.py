@@ -104,6 +104,10 @@ def test_per_layer_landmark(base_model, tokenizer, train_texts, test_texts, args
     landmarks = {}
     num_layers = 0
     
+    # Get device and dtype from base model
+    device = next(model.base_model.parameters()).device
+    dtype = next(model.base_model.parameters()).dtype
+    
     # For GPT-2, we want to apply landmarks after each transformer block's output
     # Not on individual projections like c_proj
     for name, module in model.base_model.named_modules():
@@ -114,7 +118,7 @@ def test_per_layer_landmark(base_model, tokenizer, train_texts, test_texts, args
                 hidden_size=model.hidden_size,
                 num_landmarks=args.num_landmarks // 2,  # Use fewer per layer
                 dropout=0.0,
-            )
+            ).to(device=device, dtype=dtype)  # Match model device and dtype
             
             # Register as parameter
             param_name = name.replace(".", "_") + "_landmark"
