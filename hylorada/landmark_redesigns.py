@@ -188,8 +188,12 @@ class LearnableBucketLandmark(nn.Module):
         Returns:
             [seq, num_buckets] soft bucket assignment weights
         """
+        # Get dtype from position_gates to ensure consistency
+        target_dtype = self.position_gates.dtype
+        
         # Normalize positions to [0, 1]
         norm_pos = positions.float() / self.max_positions  # [seq]
+        norm_pos = norm_pos.to(dtype=target_dtype)
         
         # Sort boundaries to ensure monotonicity (prevent crossing)
         sorted_boundaries = torch.sort(self.bucket_boundaries)[0]
@@ -209,7 +213,7 @@ class LearnableBucketLandmark(nn.Module):
         # Last bucket: boundary_probs[-1]
         bucket_weights = torch.zeros(
             positions.size(0), self.num_buckets,
-            device=positions.device, dtype=boundary_probs.dtype
+            device=positions.device, dtype=target_dtype
         )
         
         bucket_weights[:, 0] = 1 - boundary_probs[:, 0]
