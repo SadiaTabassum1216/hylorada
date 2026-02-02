@@ -304,10 +304,11 @@ class HyLoRADAModel(nn.Module):
             state_dict[f"lora.{name}.A"] = layer.lora.lora_A.data
             state_dict[f"lora.{name}.B"] = layer.lora.lora_B.data
         
-        # Save Landmark weights
+        # Save Landmark weights (Position-Adaptive)
         if self.state.landmark is not None:
             state_dict["landmark.landmarks"] = self.state.landmark.landmarks.data
-            state_dict["landmark.gate"] = self.state.landmark.gate.weight.data
+            state_dict["landmark.position_gates"] = self.state.landmark.position_gates.data
+            state_dict["landmark.content_gate"] = self.state.landmark.content_gate.weight.data
             state_dict["landmark.scale"] = self.state.landmark.scale.data
         
         # Save config
@@ -326,10 +327,16 @@ class HyLoRADAModel(nn.Module):
                 layer.lora.lora_A.data = state_dict[f"lora.{name}.A"]
                 layer.lora.lora_B.data = state_dict[f"lora.{name}.B"]
         
-        # Load Landmark weights
+        # Load Landmark weights (Position-Adaptive)
         if self.state.landmark is not None and "landmark.landmarks" in state_dict:
             self.state.landmark.landmarks.data = state_dict["landmark.landmarks"]
-            self.state.landmark.gate.weight.data = state_dict["landmark.gate"]
+            # Support both old (gate) and new (position_gates + content_gate) formats
+            if "landmark.position_gates" in state_dict:
+                self.state.landmark.position_gates.data = state_dict["landmark.position_gates"]
+                self.state.landmark.content_gate.weight.data = state_dict["landmark.content_gate"]
+            elif "landmark.gate" in state_dict:
+                # Legacy support: convert old gate to content_gate
+                self.state.landmark.content_gate.weight.data = state_dict["landmark.gate"]
             self.state.landmark.scale.data = state_dict["landmark.scale"]
         
         print(f"Loaded HyLoRADA weights from {path}")
