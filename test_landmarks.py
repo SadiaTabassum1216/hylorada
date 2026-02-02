@@ -69,7 +69,7 @@ def test_original_landmark(base_model, tokenizer, train_texts, test_texts, args)
         gradient_accumulation_steps=args.grad_accum,
     )
     
-    trainer = HyLoRADATrainer(model, train_dataloader, train_config, eval_dataloader=eval_dataloader)
+    trainer = HyLoRADATrainer(model, train_dataloader, eval_dataloader, train_config)
     trainer.train()
     
     # Evaluate
@@ -154,7 +154,7 @@ def test_per_layer_landmark(base_model, tokenizer, train_texts, test_texts, args
         gradient_accumulation_steps=args.grad_accum,
     )
     
-    trainer = HyLoRADATrainer(model, train_dataloader, train_config, eval_dataloader=eval_dataloader)
+    trainer = HyLoRADATrainer(model, train_dataloader, eval_dataloader, train_config)
     trainer.train()
     
     # Evaluate
@@ -229,7 +229,7 @@ def test_position_adaptive_landmark(base_model, tokenizer, train_texts, test_tex
         gradient_accumulation_steps=args.grad_accum,
     )
     
-    trainer = HyLoRADATrainer(model, train_dataloader, train_config, eval_dataloader=eval_dataloader)
+    trainer = HyLoRADATrainer(model, train_dataloader, eval_dataloader, train_config)
     trainer.train()
     
     # Evaluate
@@ -278,7 +278,7 @@ def test_baseline_no_landmark(base_model, tokenizer, train_texts, test_texts, ar
         gradient_accumulation_steps=args.grad_accum,
     )
     
-    trainer = HyLoRADATrainer(model, train_dataloader, train_config, eval_dataloader=eval_dataloader)
+    trainer = HyLoRADATrainer(model, train_dataloader, eval_dataloader, train_config)
     trainer.train()
     
     # Evaluate
