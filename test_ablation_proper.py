@@ -183,60 +183,18 @@ def test_lora_basic(device, dtype, tokenizer, test_texts, num_train, epochs):
     )
 
 
-def test_dora(device, dtype, tokenizer, test_texts, num_train, epochs):
-    """Test 3: DoRA (rsLoRA + magnitude decomposition)."""
+def test_position_bias_only(device, dtype, tokenizer, test_texts, num_train, epochs):
+    """Test 3: rsLoRA + Position Bias (no DoRA)."""
     print("\n" + "="*80)
-    print("TEST 3: DoRA (Magnitude Decomposition)")
+    print("TEST 3: Position Bias")
     print("="*80)
-    print("rsLoRA + DoRA magnitude vectors")
+    print("rsLoRA + Position Bias (64 buckets, no DoRA)")
     
     config = HyLoRADAConfig(
         lora_rank=8,
         lora_alpha=16,
         lora_dropout=0.05,
-        use_dora_magnitude=True,
-        position_bias_enabled=False,
-        landmark_enabled=False,
-    )
-    
-    base_model = GPT2LMHeadModel.from_pretrained("gpt2")
-    base_model.to(device=device, dtype=dtype)
-    model = HyLoRADAModel(base_model, config)
-    model.to(device=device, dtype=dtype)
-    
-    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Trainable params: {params:,}")
-    
-    train_model(model, tokenizer, num_train, epochs, device)
-    
-    model.eval()
-    result = evaluate_perplexity(model.base_model, tokenizer, test_texts, max_length=512, show_progress=False)
-    ppl = result.perplexity
-    print(f"✓ PPL: {ppl:.2f}")
-    
-    del model
-    torch.cuda.empty_cache()
-    
-    return ComponentResult(
-        name="rsLoRA + DoRA",
-        description="Rank-stabilized + magnitude decomposition",
-        ppl=ppl,
-        params=params,
-    )
-
-
-def test_position_bias(device, dtype, tokenizer, test_texts, num_train, epochs):
-    """Test 4: rsLoRA + DoRA + Position Bias."""
-    print("\n" + "="*80)
-    print("TEST 4: Position Bias")
-    print("="*80)
-    print("rsLoRA + DoRA + Position Bias (64 buckets)")
-    
-    config = HyLoRADAConfig(
-        lora_rank=8,
-        lora_alpha=16,
-        lora_dropout=0.05,
-        use_dora_magnitude=True,
+        use_dora_magnitude=False,
         position_bias_enabled=True,
         position_num_buckets=64,
         landmark_enabled=False,
@@ -247,8 +205,8 @@ def test_position_bias(device, dtype, tokenizer, test_texts, num_train, epochs):
     model = HyLoRADAModel(base_model, config)
     model.to(device=device, dtype=dtype)
     
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Trainable params: {total_params:,}")
+    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Trainable params: {params:,}")
     print(f"  Position bias: 64 params")
     
     train_model(model, tokenizer, num_train, epochs, device)
@@ -262,26 +220,26 @@ def test_position_bias(device, dtype, tokenizer, test_texts, num_train, epochs):
     torch.cuda.empty_cache()
     
     return ComponentResult(
-        name="rsLoRA + DoRA + Position Bias",
-        description="Added position-aware scaling (64 additional params)",
+        name="rsLoRA + Position Bias",
+        description="Position-aware scaling (64 params)",
         ppl=ppl,
-        params=total_params,  # Total trainable params
+        params=params,
     )
 
 
-def test_position_adaptive(device, dtype, tokenizer, test_texts, num_train, epochs, num_landmarks):
-    """Test 5: Position-Adaptive Landmarks (fixed bucketing)."""
+def test_position_adaptive_only(device, dtype, tokenizer, test_texts, num_train, epochs, num_landmarks):
+    """Test 4: rsLoRA + Position-Adaptive Landmarks (no DoRA, no Position Bias)."""
     print("\n" + "="*80)
-    print("TEST 5: Position-Adaptive Landmarks")
+    print("TEST 4: Position-Adaptive Landmarks")
     print("="*80)
-    print(f"rsLoRA + DoRA + Position Bias + {num_landmarks} landmarks (fixed bucketing)")
+    print(f"rsLoRA + {num_landmarks} landmarks (fixed bucketing, no DoRA)")
     
     config = HyLoRADAConfig(
         lora_rank=8,
         lora_alpha=16,
         lora_dropout=0.05,
-        use_dora_magnitude=True,
-        position_bias_enabled=True,
+        use_dora_magnitude=False,
+        position_bias_enabled=False,
         landmark_enabled=True,
         num_landmarks=num_landmarks,
         num_position_buckets=32,
@@ -309,33 +267,30 @@ def test_position_adaptive(device, dtype, tokenizer, test_texts, num_train, epoc
     ppl = result.perplexity
     print(f"✓ PPL: {ppl:.2f}")
     
-    # Count total trainable params (not just landmarks)
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
     del model
     torch.cuda.empty_cache()
     
     return ComponentResult(
-        name="Position-Adaptive Landmarks",
-        description=f"{num_landmarks} landmarks with fixed bucketing (landmark params: {landmark_params:,})",
+        name="rsLoRA + Position-Adaptive",
+        description=f"{num_landmarks} landmarks with fixed bucketing",
         ppl=ppl,
-        params=total_params,  # Total params, not just landmarks
+        params=params,
     )
 
 
-def test_learnable_bucketing(device, dtype, tokenizer, test_texts, num_train, epochs, num_landmarks):
-    """Test 6: Learnable-Bucket Landmarks."""
+def test_learnable_bucketing_only(device, dtype, tokenizer, test_texts, num_train, epochs, num_landmarks):
+    """Test 5: rsLoRA + Learnable-Bucket Landmarks (no DoRA, no Position Bias)."""
     print("\n" + "="*80)
-    print("TEST 6: Learnable-Bucket Landmarks")
+    print("TEST 5: Learnable-Bucket Landmarks")
     print("="*80)
-    print(f"rsLoRA + DoRA + Position Bias + {num_landmarks} landmarks (learnable bucketing)")
+    print(f"rsLoRA + {num_landmarks} landmarks (learnable bucketing, no DoRA)")
     
     config = HyLoRADAConfig(
         lora_rank=8,
         lora_alpha=16,
         lora_dropout=0.05,
-        use_dora_magnitude=True,
-        position_bias_enabled=True,
+        use_dora_magnitude=False,
+        position_bias_enabled=False,
         landmark_enabled=False,  # Add manually
     )
     
@@ -385,17 +340,67 @@ def test_learnable_bucketing(device, dtype, tokenizer, test_texts, num_train, ep
     print(f"  Learned boundaries (first 8): {boundaries.cpu().tolist()[:8]}")
     print(f"✓ PPL: {ppl:.2f}")
     
-    # Use total params, not just landmark params
-    total_params = params  # Already calculated above
+    del model
+    torch.cuda.empty_cache()
+    
+    return ComponentResult(
+        name="rsLoRA + Learnable-Bucket",
+        description=f"{num_landmarks} landmarks with learned bucketing",
+        ppl=ppl,
+        params=params,
+    )
+
+
+def test_position_bias_plus_adaptive(device, dtype, tokenizer, test_texts, num_train, epochs, num_landmarks):
+    """Test 6: rsLoRA + Position Bias + Position-Adaptive (combined)."""
+    print("\n" + "="*80)
+    print("TEST 6: Position Bias + Position-Adaptive")
+    print("="*80)
+    print(f"rsLoRA + Position Bias + {num_landmarks} landmarks (fixed bucketing)")
+    
+    config = HyLoRADAConfig(
+        lora_rank=8,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        use_dora_magnitude=False,
+        position_bias_enabled=True,
+        position_num_buckets=64,
+        landmark_enabled=True,
+        num_landmarks=num_landmarks,
+        num_position_buckets=32,
+    )
+    
+    base_model = GPT2LMHeadModel.from_pretrained("gpt2")
+    base_model.to(device=device, dtype=dtype)
+    model = HyLoRADAModel(base_model, config)
+    model.to(device=device, dtype=dtype)
+    
+    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    hidden_size = base_model.config.hidden_size
+    landmark_params = (
+        num_landmarks * hidden_size +
+        32 * num_landmarks +
+        hidden_size * num_landmarks
+    )
+    print(f"Trainable params: {params:,}")
+    print(f"  Position bias: 64 params")
+    print(f"  Landmark params: {landmark_params:,}")
+    
+    train_model(model, tokenizer, num_train, epochs, device)
+    
+    model.eval()
+    result = evaluate_perplexity(model.base_model, tokenizer, test_texts, max_length=512, show_progress=False)
+    ppl = result.perplexity
+    print(f"✓ PPL: {ppl:.2f}")
     
     del model
     torch.cuda.empty_cache()
     
     return ComponentResult(
-        name="Alternative: Learnable-Bucket Landmarks",
-        description=f"{num_landmarks} landmarks with learned bucketing instead of fixed (landmark params: {landmark_params:,})",
+        name="rsLoRA + Position Bias + Position-Adaptive",
+        description=f"Position bias + {num_landmarks} landmarks (combined)",
         ppl=ppl,
-        params=total_params,  # Total trainable params
+        params=params,
     )
 
 
@@ -509,10 +514,10 @@ def main():
     baseline_ppl = results[0].ppl
     
     results.append(test_lora_basic(device, dtype, tokenizer, test_texts, args.num_train, args.epochs))
-    results.append(test_dora(device, dtype, tokenizer, test_texts, args.num_train, args.epochs))
-    results.append(test_position_bias(device, dtype, tokenizer, test_texts, args.num_train, args.epochs))
-    results.append(test_position_adaptive(device, dtype, tokenizer, test_texts, args.num_train, args.epochs, args.num_landmarks))
-    results.append(test_learnable_bucketing(device, dtype, tokenizer, test_texts, args.num_train, args.epochs, args.num_landmarks))
+    results.append(test_position_bias_only(device, dtype, tokenizer, test_texts, args.num_train, args.epochs))
+    results.append(test_position_adaptive_only(device, dtype, tokenizer, test_texts, args.num_train, args.epochs, args.num_landmarks))
+    results.append(test_learnable_bucketing_only(device, dtype, tokenizer, test_texts, args.num_train, args.epochs, args.num_landmarks))
+    results.append(test_position_bias_plus_adaptive(device, dtype, tokenizer, test_texts, args.num_train, args.epochs, args.num_landmarks))
     
     # Print results
     print_results_table(results, baseline_ppl)
