@@ -12,6 +12,15 @@ from hylorada.lora import (
     apply_unified_to_model,
 )
 
+# Landmark redesigns (experimental)
+from hylorada.landmark_redesigns import (
+    PerLayerLandmark,
+    AttentionIntegratedLandmark,
+    PositionAdaptiveLandmark,
+    apply_per_layer_landmarks,
+    apply_attention_landmarks,
+)
+
 # Legacy & baselines (for comparison)
 from hylorada.lora import (
     LoRALinear,
@@ -67,6 +76,12 @@ __all__ = [
     # Components
     "LandmarkLoRA",
     "ShiftedSparseAttention",
+    # Landmark redesigns (experimental)
+    "PerLayerLandmark",
+    "AttentionIntegratedLandmark",
+    "PositionAdaptiveLandmark",
+    "apply_per_layer_landmarks",
+    "apply_attention_landmarks",
     # Evaluation
     "evaluate_perplexity",
     "evaluate_lost_in_the_middle",

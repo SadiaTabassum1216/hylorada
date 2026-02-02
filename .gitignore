@@ -2,6 +2,7 @@ venv
 output
 experiments
 .pytest_cache
+.github
 __pycache__
 
 LR_papers
