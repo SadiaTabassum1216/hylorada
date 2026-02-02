@@ -101,7 +101,9 @@ def create_baseline_model(device, dtype=torch.bfloat16):
     )
     
     base_model = GPT2LMHeadModel.from_pretrained("gpt2")
+    base_model.to(device=device, dtype=dtype)
     model = HyLoRADAModel(base_model, config)
+    # Move again after wrapper to ensure all parameters are on device
     model.to(device=device, dtype=dtype)
     
     return model, config
@@ -119,7 +121,9 @@ def create_position_adaptive_model(device, num_landmarks=8, dtype=torch.bfloat16
     )
     
     base_model = GPT2LMHeadModel.from_pretrained("gpt2")
+    base_model.to(device=device, dtype=dtype)
     model = HyLoRADAModel(base_model, config)
+    # Move again after wrapper to ensure all parameters are on device
     model.to(device=device, dtype=dtype)
     
     return model, config
@@ -136,6 +140,7 @@ def create_learnable_bucket_model(device, num_landmarks=8, dtype=torch.bfloat16)
     )
     
     base_model = GPT2LMHeadModel.from_pretrained("gpt2")
+    base_model.to(device=device, dtype=dtype)
     model = HyLoRADAModel(base_model, config)
     
     # Manually add learnable bucket landmark
@@ -147,6 +152,7 @@ def create_learnable_bucket_model(device, num_landmarks=8, dtype=torch.bfloat16)
         num_buckets=32,
         dropout=0.05,
     )
+    landmark.to(device=device, dtype=dtype)
     
     # Register as hook on final layer norm (same as built-in landmarks)
     def landmark_hook(module, input, output):
@@ -163,6 +169,7 @@ def create_learnable_bucket_model(device, num_landmarks=8, dtype=torch.bfloat16)
             print(f"✓ Registered learnable bucket landmark at {name}")
             break
     
+    # Move entire model to device after wrapper
     model.to(device=device, dtype=dtype)
     
     return model, config, landmark
