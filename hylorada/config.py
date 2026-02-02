@@ -50,8 +50,10 @@ class HyLoRADAConfig:
         "c_attn", "c_proj",  # GPT-2
         "query_key_value",  # Falcon
     )
-    # DoRA magnitude: True = better accuracy (matches full fine-tuning), False = lightweight
-    use_dora_magnitude: bool = True
+    # DoRA magnitude: True = magnitude decomposition, False = standard LoRA
+    # Note: Ablation shows DoRA can degrade performance (-5.62% in tests)
+    # Enable only if validated on your specific task
+    use_dora_magnitude: bool = False
 
     
     # ============ Position-Aware Scaling ============
