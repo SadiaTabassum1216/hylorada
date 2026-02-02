@@ -15,6 +15,7 @@ from hylorada.lora import (
 # Landmark redesigns (experimental - for testing)
 from hylorada.landmark_redesigns import (
     PositionAdaptiveLandmark,
+    LearnableBucketLandmark,
     count_landmark_params,
 )
 
