@@ -392,8 +392,8 @@ def test_learnable_bucketing(device, dtype, tokenizer, test_texts, num_train, ep
     torch.cuda.empty_cache()
     
     return ComponentResult(
-        name="Learnable-Bucket Landmarks",
-        description=f"{num_landmarks} landmarks with learned bucketing (landmark params: {landmark_params:,})",
+        name="Alternative: Learnable-Bucket Landmarks",
+        description=f"{num_landmarks} landmarks with learned bucketing instead of fixed (landmark params: {landmark_params:,})",
         ppl=ppl,
         params=total_params,  # Total trainable params
     )
@@ -440,7 +440,6 @@ def print_results_table(results: List[ComponentResult], baseline_ppl: float):
                 print(f"  PPL: {prev.ppl:.2f} → {curr.ppl:.2f}")
                 print(f"  Change: {delta_ppl:+.2f}%")
                 print(f"  Additional params: {delta_params:,}")
-                print(f"  Cumulative params: {curr.params:,}")
                 print(f"  Cumulative params: {curr.params:,}")
                 
                 if delta_ppl > 1.0:
