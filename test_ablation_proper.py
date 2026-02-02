@@ -247,8 +247,8 @@ def test_position_bias(device, dtype, tokenizer, test_texts, num_train, epochs):
     model = HyLoRADAModel(base_model, config)
     model.to(device=device, dtype=dtype)
     
-    params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Trainable params: {params:,}")
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Trainable params: {total_params:,}")
     print(f"  Position bias: 64 params")
     
     train_model(model, tokenizer, num_train, epochs, device)
@@ -263,9 +263,9 @@ def test_position_bias(device, dtype, tokenizer, test_texts, num_train, epochs):
     
     return ComponentResult(
         name="rsLoRA + DoRA + Position Bias",
-        description="Added position-aware scaling (64 params)",
+        description="Added position-aware scaling (64 additional params)",
         ppl=ppl,
-        params=64,  # Only position bias params
+        params=total_params,  # Total trainable params
     )
 
 
@@ -309,14 +309,17 @@ def test_position_adaptive(device, dtype, tokenizer, test_texts, num_train, epoc
     ppl = result.perplexity
     print(f"✓ PPL: {ppl:.2f}")
     
+    # Count total trainable params (not just landmarks)
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
     del model
     torch.cuda.empty_cache()
     
     return ComponentResult(
         name="Position-Adaptive Landmarks",
-        description=f"{num_landmarks} landmarks with fixed bucketing",
+        description=f"{num_landmarks} landmarks with fixed bucketing (landmark params: {landmark_params:,})",
         ppl=ppl,
-        params=landmark_params,
+        params=total_params,  # Total params, not just landmarks
     )
 
 
@@ -382,14 +385,17 @@ def test_learnable_bucketing(device, dtype, tokenizer, test_texts, num_train, ep
     print(f"  Learned boundaries (first 8): {boundaries.cpu().tolist()[:8]}")
     print(f"✓ PPL: {ppl:.2f}")
     
+    # Use total params, not just landmark params
+    total_params = params  # Already calculated above
+    
     del model
     torch.cuda.empty_cache()
     
     return ComponentResult(
         name="Learnable-Bucket Landmarks",
-        description=f"{num_landmarks} landmarks with learned bucketing (+31 params)",
+        description=f"{num_landmarks} landmarks with learned bucketing (landmark params: {landmark_params:,})",
         ppl=ppl,
-        params=landmark_params,
+        params=total_params,  # Total trainable params
     )
 
 
@@ -418,7 +424,7 @@ def print_results_table(results: List[ComponentResult], baseline_ppl: float):
     
     # Component analysis
     print("\n" + "="*80)
-    print("COMPONENT CONTRIBUTIONS")
+    print("COMPONENT CONTRIBUTIONS (Step-by-Step)")
     print("="*80)
     
     if len(results) >= 2:
@@ -428,12 +434,14 @@ def print_results_table(results: List[ComponentResult], baseline_ppl: float):
             
             if prev.ppl > 0:
                 delta_ppl = ((prev.ppl - curr.ppl) / prev.ppl) * 100
-                delta_params = curr.params - prev.params if i > 1 else curr.params
+                delta_params = curr.params - prev.params
                 
                 print(f"\n{curr.name} (vs {prev.name}):")
                 print(f"  PPL: {prev.ppl:.2f} → {curr.ppl:.2f}")
                 print(f"  Change: {delta_ppl:+.2f}%")
                 print(f"  Additional params: {delta_params:,}")
+                print(f"  Cumulative params: {curr.params:,}")
+                print(f"  Cumulative params: {curr.params:,}")
                 
                 if delta_ppl > 1.0:
                     print(f"  ✓ KEEP: {delta_ppl:.2f}% improvement is significant")
