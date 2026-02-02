@@ -196,13 +196,17 @@ def test_position_adaptive_landmark(base_model, tokenizer, train_texts, test_tex
     
     model = HyLoRADAModel(base_model, config)
     
+    # Get device and dtype from base model
+    device = next(model.base_model.parameters()).device
+    dtype = next(model.base_model.parameters()).dtype
+    
     # Apply position-adaptive landmark at final norm
     landmark = PositionAdaptiveLandmark(
         hidden_size=model.hidden_size,
         num_landmarks=args.num_landmarks,
         max_positions=args.max_length,
         num_buckets=32,
-    )
+    ).to(device=device, dtype=dtype)  # Match model device and dtype
     
     model.add_module("position_adaptive_landmark", landmark)
     
