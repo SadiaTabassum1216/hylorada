@@ -8,8 +8,22 @@ Datasets:
   - wikitext: WikiText-2 language modeling (default)
   - code: CodeSearchNet Python code summarization (Software Engineering)
 
+Models (small, resource-efficient):
+  - gpt2: GPT-2 Small (124M params)
+  - distilgpt2: DistilGPT-2 (82M params)
+  - gpt2-medium: GPT-2 Medium (355M params)
+  - opt-125m: OPT 125M (Meta)
+  - opt-350m: OPT 350M (Meta)
+  - pythia-70m: Pythia 70M (EleutherAI)
+  - pythia-160m: Pythia 160M (EleutherAI)
+  - pythia-410m: Pythia 410M (EleutherAI)
+  - qwen2-0.5b: Qwen2 0.5B (Alibaba)
+  - tinyllama: TinyLlama 1.1B
+
 Usage:
     python run_benchmark.py --dataset code --methods lora dora hylorada --epochs 3
+    python run_benchmark.py --model pythia-160m --methods lora hylorada --epochs 3
+    python run_benchmark.py --models gpt2 pythia-160m opt-125m --methods hylorada --epochs 3
 """
 
 import argparse
@@ -31,10 +45,159 @@ from hylorada.trainer import HyLoRADATrainer, TrainingConfig, create_long_contex
 from hylorada.evaluation import evaluate_perplexity, evaluate_lost_in_the_middle
 
 
-def load_fresh_model(model_name, device, dtype):
-    """Load a fresh model instance."""
+# ============ Small Model Registry ============
+# Maps short aliases to HuggingFace model IDs and their architecture info
+# All models are small (<1B params unless noted) for resource-constrained validation
+SMALL_MODELS = {
+    # GPT-2 Family (OpenAI)
+    "gpt2": {
+        "hf_id": "openai-community/gpt2",
+        "params": "124M",
+        "architecture": "gpt2",
+        "target_modules": ("c_attn", "c_proj"),
+        "max_context": 1024,
+    },
+    "distilgpt2": {
+        "hf_id": "distilbert/distilgpt2",
+        "params": "82M",
+        "architecture": "gpt2",
+        "target_modules": ("c_attn", "c_proj"),
+        "max_context": 1024,
+    },
+    "gpt2-medium": {
+        "hf_id": "openai-community/gpt2-medium",
+        "params": "355M",
+        "architecture": "gpt2",
+        "target_modules": ("c_attn", "c_proj"),
+        "max_context": 1024,
+    },
+    # OPT Family (Meta)
+    "opt-125m": {
+        "hf_id": "facebook/opt-125m",
+        "params": "125M",
+        "architecture": "opt",
+        "target_modules": ("q_proj", "k_proj", "v_proj", "out_proj"),
+        "max_context": 2048,
+    },
+    "opt-350m": {
+        "hf_id": "facebook/opt-350m",
+        "params": "350M",
+        "architecture": "opt",
+        "target_modules": ("q_proj", "k_proj", "v_proj", "out_proj"),
+        "max_context": 2048,
+    },
+    # Pythia Family (EleutherAI)
+    "pythia-70m": {
+        "hf_id": "EleutherAI/pythia-70m",
+        "params": "70M",
+        "architecture": "gpt_neox",
+        "target_modules": ("query_key_value", "dense"),
+        "max_context": 2048,
+    },
+    "pythia-160m": {
+        "hf_id": "EleutherAI/pythia-160m",
+        "params": "160M",
+        "architecture": "gpt_neox",
+        "target_modules": ("query_key_value", "dense"),
+        "max_context": 2048,
+    },
+    "pythia-410m": {
+        "hf_id": "EleutherAI/pythia-410m",
+        "params": "410M",
+        "architecture": "gpt_neox",
+        "target_modules": ("query_key_value", "dense"),
+        "max_context": 2048,
+    },
+    # Qwen Family (Alibaba) - smallest models
+    "qwen2-0.5b": {
+        "hf_id": "Qwen/Qwen2-0.5B",
+        "params": "500M",
+        "architecture": "qwen2",
+        "target_modules": ("q_proj", "k_proj", "v_proj", "o_proj"),
+        "max_context": 32768,
+    },
+    # TinyLlama (slightly larger but popular)
+    "tinyllama": {
+        "hf_id": "TinyLlama/TinyLlama_v1.1",
+        "params": "1.1B",
+        "architecture": "llama",
+        "target_modules": ("q_proj", "k_proj", "v_proj", "o_proj"),
+        "max_context": 2048,
+    },
+}
+
+
+def get_model_info(model_name: str) -> dict:
+    """Get model info from registry or infer from model name."""
+    # Check if it's an alias
+    if model_name.lower() in SMALL_MODELS:
+        return SMALL_MODELS[model_name.lower()]
+    
+    # Otherwise, treat as a direct HuggingFace ID
+    # Infer architecture from name
+    lower_name = model_name.lower()
+    if "gpt2" in lower_name:
+        arch = "gpt2"
+        target_modules = ("c_attn", "c_proj")
+        max_ctx = 1024
+    elif "opt" in lower_name:
+        arch = "opt"
+        target_modules = ("q_proj", "k_proj", "v_proj", "out_proj")
+        max_ctx = 2048
+    elif "pythia" in lower_name or "gpt-neox" in lower_name:
+        arch = "gpt_neox"
+        target_modules = ("query_key_value", "dense")
+        max_ctx = 2048
+    elif "qwen" in lower_name:
+        arch = "qwen2"
+        target_modules = ("q_proj", "k_proj", "v_proj", "o_proj")
+        max_ctx = 32768
+    elif "llama" in lower_name or "tinyllama" in lower_name:
+        arch = "llama"
+        target_modules = ("q_proj", "k_proj", "v_proj", "o_proj")
+        max_ctx = 2048
+    elif "falcon" in lower_name:
+        arch = "falcon"
+        target_modules = ("query_key_value", "dense")
+        max_ctx = 2048
+    else:
+        # Default to LLaMA-style
+        arch = "unknown"
+        target_modules = ("q_proj", "k_proj", "v_proj", "o_proj")
+        max_ctx = 2048
+    
+    return {
+        "hf_id": model_name,
+        "params": "unknown",
+        "architecture": arch,
+        "target_modules": target_modules,
+        "max_context": max_ctx,
+    }
+
+
+def list_available_models():
+    """Print available model presets."""
+    print("\nAvailable Small Models:")
+    print("-" * 70)
+    print(f"{'Alias':<15} {'Params':<10} {'Architecture':<12} {'Max Context':<12}")
+    print("-" * 70)
+    for alias, info in SMALL_MODELS.items():
+        print(f"{alias:<15} {info['params']:<10} {info['architecture']:<12} {info['max_context']:<12}")
+    print("-" * 70)
+    print("Use --model <alias> or --models <alias1> <alias2> ... for multi-model validation")
+    print("You can also use any HuggingFace model ID directly.")
+    print()
+
+
+def load_fresh_model(model_name_or_alias, device, dtype):
+    """Load a fresh model instance from alias or HuggingFace ID."""
+    model_info = get_model_info(model_name_or_alias)
+    hf_id = model_info["hf_id"]
+    
+    print(f"  Loading {hf_id} ({model_info['params']} params, {model_info['architecture']} arch)...")
+    
     return AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=dtype, trust_remote_code=True
+        hf_id, torch_dtype=dtype, trust_remote_code=True
     ).to(device)
 
 
@@ -259,7 +422,12 @@ def extend_gpt2_context(model, new_length):
 
 def main():
     parser = argparse.ArgumentParser(description="Benchmark PEFT Methods")
-    parser.add_argument("--model", type=str, default="openai-community/gpt2")
+    parser.add_argument("--model", type=str, default="gpt2",
+                        help="Single model alias or HuggingFace ID (default: gpt2)")
+    parser.add_argument("--models", nargs="+", default=None,
+                        help="Multiple models for cross-model validation (e.g., --models gpt2 pythia-160m opt-125m)")
+    parser.add_argument("--list-models", action="store_true",
+                        help="List available small model presets")
     parser.add_argument("--max_length", type=int, default=1024)
     parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=1)
@@ -293,26 +461,105 @@ def main():
                         help="RoPE scaling factor")
     args = parser.parse_args()
     
+    # List models and exit if requested
+    if args.list_models:
+        list_available_models()
+        return
+    
     # Parse sparse_layers if provided
     if args.sparse_layers:
         args.sparse_layers = [int(x.strip()) for x in args.sparse_layers.split(",")]
     
+    # Determine models to benchmark
+    if args.models:
+        model_list = args.models
+    else:
+        model_list = [args.model]
+    
     device = "cuda" if torch.cuda.is_available() else "cpu"
     dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+    
+    # Run benchmarks for each model
+    all_results = {}
+    for model_alias in model_list:
+        print("\n" + "=" * 80)
+        print(f"BENCHMARKING MODEL: {model_alias}")
+        print("=" * 80)
+        
+        model_results = run_benchmark_for_model(model_alias, args, device, dtype)
+        all_results[model_alias] = model_results
+    
+    # Print cross-model summary if multiple models
+    if len(model_list) > 1:
+        print_cross_model_summary(all_results, model_list)
+    
+    # Save combined results
+    os.makedirs(args.output_dir, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file = os.path.join(args.output_dir, f"benchmark_multimodel_{timestamp}.json")
+    
+    with open(output_file, "w") as f:
+        json.dump({"config": vars(args), "results": all_results}, f, indent=2)
+    
+    print(f"\nResults saved to: {output_file}")
 
-    # Define target modules based on model family
-    is_gpt2 = "gpt2" in args.model.lower()
-    if is_gpt2:
-        target_modules = ("c_attn", "c_proj")
-        print(f"Detected GPT-2 model. Using target modules: {target_modules}")
-    else:
-        target_modules = ("q_proj", "k_proj", "v_proj", "o_proj")
-        print(f"Detected LLaMA/Qwen model. Using target modules: {target_modules}")
+
+def print_cross_model_summary(all_results, model_list):
+    """Print a cross-model comparison summary."""
+    print("\n" + "=" * 90)
+    print("CROSS-MODEL COMPARISON")
+    print("=" * 90)
+    
+    # Collect all methods used
+    all_methods = set()
+    for model_name in model_list:
+        if model_name in all_results:
+            all_methods.update(all_results[model_name].keys())
+    
+    # Print header
+    header = f"{'Method':<12}"
+    for model_name in model_list:
+        model_info = get_model_info(model_name)
+        short_name = model_name[:10]
+        header += f" {short_name:>12}"
+    print(header)
+    print("-" * 90)
+    
+    # Print perplexity for each method
+    for method in sorted(all_methods):
+        if method == "error":
+            continue
+        row = f"{method:<12}"
+        for model_name in model_list:
+            if model_name in all_results and method in all_results[model_name]:
+                r = all_results[model_name][method]
+                if "error" in r:
+                    row += f" {'ERROR':>12}"
+                else:
+                    ppl = r.get("perplexity", float("inf"))
+                    row += f" {ppl:>12.2f}"
+            else:
+                row += f" {'-':>12}"
+        print(row)
+    
+    print("=" * 90)
+
+
+def run_benchmark_for_model(model_alias, args, device, dtype):
+    """Run benchmark for a single model."""
+    model_info = get_model_info(model_alias)
+    hf_id = model_info["hf_id"]
+    target_modules = model_info["target_modules"]
+    architecture = model_info["architecture"]
+    
+    print(f"Model: {hf_id} ({model_info['params']} params)")
+    print(f"Architecture: {architecture}")
+    print(f"Target modules: {target_modules}")
     
     print("=" * 70)
     print("PEFT Methods Benchmark")
     print("=" * 70)
-    print(f"Model: {args.model}")
+    print(f"Model: {hf_id}")
     print(f"Dataset: {args.dataset}")
     print(f"Methods: {', '.join(args.methods)}")
     print(f"Hyperparameters: epochs={args.epochs}, batch={args.batch_size}, lr={args.lr}")
@@ -321,7 +568,7 @@ def main():
     
     # Load tokenizer
     print("\n[1] Loading tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(hf_id, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
@@ -353,10 +600,10 @@ def main():
         try:
             # Load fresh model
             print("  Loading fresh model...")
-            base_model = load_fresh_model(args.model, device, dtype)
+            base_model = load_fresh_model(model_alias, device, dtype)
             
             # Extend context for GPT-2 if needed
-            if "gpt2" in args.model.lower() and args.max_length > 1024:
+            if architecture == "gpt2" and args.max_length > 1024:
                 extend_gpt2_context(base_model, args.max_length)
             
             # Ensure base model is in correct dtype (critical for evaluation stability)
@@ -412,8 +659,8 @@ def main():
             
             elif method == "hylorada":
                 # HyLoRADA: Context-length adaptive configuration
-                # Short context (<1K): rsLoRA only
-                # Long context (4K+): Enable position bias + landmarks
+                # Uses Position-Content Fusion (PCF) - unified approach
+                # PCF learns when to use position/landmark information
                 is_long_context = args.max_length >= 2048
                 
                 config = HyLoRADAConfig(
@@ -421,9 +668,8 @@ def main():
                     lora_alpha=args.lora_rank * 2,  # Standard rsLoRA scaling
                     lora_dropout=0.05,
                     use_dora_magnitude=False,  # Ablation: DoRA degrades on short context
-                    position_bias_enabled=is_long_context,  # Enable for long context only
-                    landmark_enabled=is_long_context,  # Enable for long context only
-                    num_landmarks=8 if is_long_context else 0,
+                    num_landmarks=8 if is_long_context else 4,  # PCF landmarks
+                    num_position_buckets=64,  # Position bucketing granularity
                     s2_attn_enabled=args.s2_attn if args.max_length >= 4096 else False,
                     max_sequence_length=args.max_length,
                     train_embeddings=args.train_embeddings,
@@ -433,7 +679,7 @@ def main():
                     rope_scaling_factor=args.rope_scaling_factor,
                 )
                 
-                print(f"  Config: long_context={is_long_context}, position_bias={is_long_context}, landmarks={is_long_context}")
+                print(f"  Config: long_context={is_long_context}, landmarks={config.num_landmarks}, position_buckets={config.num_position_buckets}")
                 model = HyLoRADAModel(base_model, config)
                 
                 model.print_trainable_params()
@@ -499,9 +745,9 @@ def main():
             print(f"  ✗ Error: {e}")
             results[method] = {"error": str(e)}
     
-    # Summary
+    # Summary for this model
     print("\n" + "=" * 80)
-    print("RESULTS SUMMARY")
+    print(f"RESULTS SUMMARY for {model_alias}")
     print("=" * 80)
     if torch.cuda.is_available():
         print(f"{'Method':<12} {'Params':>12} {'Mem(GB)':>10} {'Time':>10} {'PPL':>10} {'LiM PPL':>10}")
@@ -525,15 +771,7 @@ def main():
     
     print("=" * 80)
     
-    # Save results
-    os.makedirs(args.output_dir, exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_file = os.path.join(args.output_dir, f"benchmark_{timestamp}.json")
-    
-    with open(output_file, "w") as f:
-        json.dump({"config": vars(args), "results": results}, f, indent=2)
-    
-    print(f"\nResults saved to: {output_file}")
+    return results
 
 
 if __name__ == "__main__":

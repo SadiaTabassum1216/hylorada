@@ -32,6 +32,47 @@ class BaselineConfig:
     sparse_target_layers: Optional[list] = None  # None = all layers
     daa_per_head: bool = True
     max_sequence_length: int = 32768
+    # Custom target modules for different architectures
+    # None = auto-detect based on model
+    target_modules: Optional[Tuple[str, ...]] = None
+
+
+def get_default_target_modules(model: nn.Module) -> Tuple[str, ...]:
+    """
+    Auto-detect appropriate target modules based on model architecture.
+    
+    Supports: GPT-2, OPT, Pythia/GPT-NeoX, LLaMA, Qwen, Falcon
+    """
+    model_config = getattr(model, "config", None)
+    model_type = getattr(model_config, "model_type", "unknown").lower() if model_config else "unknown"
+    
+    # Check for specific architectures
+    if model_type in ("gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"):
+        return ("c_attn", "c_proj")
+    elif model_type in ("opt",):
+        return ("q_proj", "k_proj", "v_proj", "out_proj")
+    elif model_type in ("gpt_neox", "pythia"):
+        return ("query_key_value", "dense")
+    elif model_type in ("llama", "llama2", "tinyllama"):
+        return ("q_proj", "k_proj", "v_proj", "o_proj")
+    elif model_type in ("qwen", "qwen2"):
+        return ("q_proj", "k_proj", "v_proj", "o_proj")
+    elif model_type in ("falcon", "refinedweb"):
+        return ("query_key_value", "dense")
+    elif model_type in ("mistral", "mixtral"):
+        return ("q_proj", "k_proj", "v_proj", "o_proj")
+    else:
+        # Fallback: try to guess from model structure
+        module_names = [name for name, _ in model.named_modules()]
+        name_str = " ".join(module_names).lower()
+        
+        if "c_attn" in name_str:
+            return ("c_attn", "c_proj")
+        elif "query_key_value" in name_str:
+            return ("query_key_value", "dense")
+        else:
+            # Default to LLaMA-style
+            return ("q_proj", "k_proj", "v_proj", "o_proj")
 
 
 class StandardLoRA(nn.Module):
@@ -53,13 +94,14 @@ class StandardLoRA(nn.Module):
         self.config = config or BaselineConfig()
         self.base_model = base_model
         
-        # Detect architecture
+        # Detect architecture and target modules
         self._detect_architecture()
+        target_modules = self.config.target_modules or get_default_target_modules(base_model)
         
-        # Apply LoRA only
+        # Apply LoRA
         self.base_model, self.lora_layers = apply_lora_to_model(
             model=self.base_model,
-            target_modules=("q_proj", "v_proj", "c_attn"),  # Original LoRA targets Q and V only
+            target_modules=target_modules,
             rank=self.config.lora_rank,
             alpha=self.config.lora_alpha,
             dropout=self.config.lora_dropout,
@@ -129,11 +171,12 @@ class LoRaDAModel(nn.Module):
         self.base_model = base_model
         
         self._detect_architecture()
+        target_modules = self.config.target_modules or get_default_target_modules(base_model)
         
         # 1. Apply LoRA
         self.base_model, self.lora_layers = apply_lora_to_model(
             model=self.base_model,
-            target_modules=("q_proj", "k_proj", "v_proj", "o_proj", "c_attn", "c_proj"),
+            target_modules=target_modules,
             rank=self.config.lora_rank,
             alpha=self.config.lora_alpha,
             dropout=self.config.lora_dropout,
@@ -236,10 +279,13 @@ class LongLoRAModel(nn.Module):
         self.config = config or BaselineConfig()
         self.base_model = base_model
         
+        # Auto-detect target modules
+        target_modules = self.config.target_modules or get_default_target_modules(base_model)
+        
         # 1. Apply LoRA to all attention projections
         self.base_model, self.lora_layers = apply_lora_to_model(
             model=self.base_model,
-            target_modules=("q_proj", "k_proj", "v_proj", "o_proj", "c_attn", "c_proj"),
+            target_modules=target_modules,
             rank=self.config.lora_rank,
             alpha=self.config.lora_alpha,
             dropout=self.config.lora_dropout,
