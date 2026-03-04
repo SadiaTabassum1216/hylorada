@@ -111,19 +111,20 @@ class HyLoRADAModel(nn.Module):
         return candidates[0]  # Default to first candidate
     
     def _apply_hylorada(self):
-        """Apply all HyLoRADA components to the model."""
-        # 1. Apply unified HyLoRADA adapters with shared position bias
-        self.base_model, self.state.lora_layers, self.state.position_bias = apply_unified_to_model(
+        """Apply unified HyLoRADA with Position-Content Fusion to the model."""
+        # 1. Apply unified HyLoRADA adapters (PCF built-in, no separate components)
+        self.base_model, self.state.lora_layers, _ = apply_unified_to_model(
             model=self.base_model,
             target_modules=self.config.lora_target_modules,
             rank=self.config.lora_rank,
             alpha=self.config.lora_alpha,
             dropout=self.config.lora_dropout,
-            use_position_bias=self.config.position_bias_enabled,
+            num_landmarks=self.config.num_landmarks,
+            num_position_buckets=self.config.num_position_buckets,
             use_dora_magnitude=self.config.use_dora_magnitude,
         )
         
-        # 2. Apply S²-Attn if enabled (long-context)
+        # 2. Apply S²-Attn if enabled (only for very long contexts >8K)
         if self.config.s2_attn_enabled:
             self.base_model, self.state.s2_wrappers = apply_s2_attention(
                 model=self.base_model,
@@ -138,52 +139,14 @@ class HyLoRADAModel(nn.Module):
         # 3. Apply RoPE Scaling if configured (YaRN/LongRoPE)
         if self.config.rope_scaling_type and hasattr(self.base_model, "config"):
             self._apply_rope_scaling()
-        
-        # 4. Apply Position-Adaptive LandmarkLoRA if enabled (9% PPL improvement)
-        if self.config.landmark_enabled:
-            self.state.landmark = LandmarkLoRA(
-                hidden_size=self.hidden_size,
-                num_landmarks=self.config.num_landmarks,
-                max_positions=self.config.max_sequence_length,
-                num_buckets=getattr(self.config, 'num_position_buckets', 32),
-                dropout=self.config.lora_dropout,
-            )
-            # Register as submodule so it moves with model.to(device)
-            self.add_module("landmark_module", self.state.landmark)
-            # Register hook to apply landmark to hidden states
-            self._register_landmark_hook()
             
-        # 5. Enable Gradient Checkpointing if configured
+        # 4. Enable Gradient Checkpointing if configured
         if self.config.gradient_checkpointing:
             if hasattr(self.base_model, "gradient_checkpointing_enable"):
                 self.base_model.gradient_checkpointing_enable()
                 # Required when using checkpointing with frozen weights
                 self.base_model.enable_input_require_grads()
                 print("Gradient checkpointing enabled (memory optimized)")
-    
-    def _register_landmark_hook(self):
-        """Register forward hook to apply Position-Adaptive LandmarkLoRA to hidden states."""
-        # Find the final layer norm (before LM head)
-        norm_module = None
-        for name, module in self.base_model.named_modules():
-            if any(n in name.lower() for n in ["norm", "ln_f", "final_layer_norm"]):
-                if isinstance(module, (torch.nn.LayerNorm, torch.nn.RMSNorm)) or "norm" in type(module).__name__.lower():
-                    norm_module = module
-        
-        if norm_module is not None:
-            def landmark_hook(module, input, output):
-                # Apply Position-Adaptive LandmarkLoRA to hidden states
-                if self.state.landmark is not None:
-                    # Ensure dtype compatibility
-                    original_dtype = output.dtype
-                    # Convert landmarks to match output dtype
-                    if self.state.landmark.landmarks.dtype != original_dtype:
-                        self.state.landmark.to(original_dtype)
-                    return self.state.landmark(output)
-                return output
-            
-            norm_module.register_forward_hook(landmark_hook)
-            print(f"Registered Position-Adaptive LandmarkLoRA hook on final norm layer")
     
     def _apply_rope_scaling(self):
         """Inject RoPE scaling configuration into base model."""
@@ -203,7 +166,6 @@ class HyLoRADAModel(nn.Module):
     def _freeze_base_model(self):
         """Freeze all non-HyLoRADA parameters."""
         # First, freeze everything
-        # First, freeze everything
         for param in self.base_model.parameters():
             param.requires_grad = False
             
@@ -221,19 +183,9 @@ class HyLoRADAModel(nn.Module):
                     for param in module.parameters():
                         param.requires_grad = True
         
-        # Then, unfreeze HyLoRADA components
+        # Unfreeze HyLoRADA components (unified - includes PCF)
         for lora_layer in self.state.lora_layers.values():
             for param in lora_layer.lora.parameters():
-                param.requires_grad = True
-        
-        # Unfreeze position bias if present
-        if self.state.position_bias is not None:
-            for param in self.state.position_bias.parameters():
-                param.requires_grad = True
-        
-        # Unfreeze landmark if present (Novel)
-        if self.state.landmark is not None:
-            for param in self.state.landmark.parameters():
                 param.requires_grad = True
     
     def forward(self, *args, **kwargs):

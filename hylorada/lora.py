@@ -969,19 +969,27 @@ class LandmarkLoRA(nn.Module):
 
 class HyLoRADAUnified(nn.Module):
     """
-    Unified HyLoRADA: Streamlined for cost-efficient long-context learning.
+    HyLoRADA: Unified Position-Content Fusion LoRA.
     
-    Combines key innovations:
-    1. Orthogonal initialization (prevents rank collapse)
-    2. Gated Magnitude (adaptive control)
-    3. Residual Blend (LoRA + DoRA dynamics)
-    4. Position-scaled adaptation (handles lost-in-middle)
+    Key Novelty: No threshold-based conditional activation. Instead, uses learned
+    soft gating that naturally handles all context lengths through Position-Content
+    Fusion (PCF).
     
-    Formula:
-        output = (1 - β) * DoRA_output + β * LoRA_output
+    Architecture:
+        output = base + rsLoRA(x) * (1 + γ * PCF(x, positions))
         
-        DoRA: (W + BA) / ||W + BA|| * m
-        LoRA: W + BA
+    Where PCF fuses:
+    - Position gates: Learned position-to-landmark affinities (log bucketing)
+    - Content gates: Token content projected to landmark space
+    - Landmarks: K learnable context summary vectors
+    
+    The model learns when to use position information rather than being forced
+    by hardcoded thresholds.
+    
+    Components:
+    1. rsLoRA: Rank-stabilized LoRA with orthogonal init (α/√r scaling)
+    2. PCF: Position-Content Fusion for adaptive modulation
+    3. Optional DoRA magnitude decomposition
     """
     
     def __init__(
@@ -991,8 +999,9 @@ class HyLoRADAUnified(nn.Module):
         rank: int = 8,
         alpha: float = 16.0,
         dropout: float = 0.0,
-        position_bias: Optional['PositionBias'] = None,
-        use_dora_magnitude: bool = True,
+        num_landmarks: int = 8,
+        num_position_buckets: int = 64,
+        use_dora_magnitude: bool = False,
     ):
         super().__init__()
         
@@ -1013,14 +1022,44 @@ class HyLoRADAUnified(nn.Module):
         self.out_features = out_features
         self.rank = rank
         self.alpha = alpha
-        self.scaling = alpha / (rank ** 0.5)  # rsLoRA scaling
+        self.scaling = alpha / (rank ** 0.5)  # rsLoRA scaling (α/√r)
         self.use_dora_magnitude = use_dora_magnitude
+        self.num_landmarks = num_landmarks
+        self.num_position_buckets = num_position_buckets
         
-        # LoRA matrices with ORTHOGONAL initialization for A
+        # === rsLoRA matrices with ORTHOGONAL initialization ===
         self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
         self.lora_B = nn.Parameter(torch.zeros(out_features, rank))
         
-        # DoRA magnitude vector (if enabled)
+        # === Position-Content Fusion (PCF) Module ===
+        # Only create PCF components if num_landmarks > 0
+        self.use_pcf = num_landmarks > 0
+        
+        if self.use_pcf:
+            # Position gates: Each position bucket has affinity to K landmarks
+            self.position_gates = nn.Parameter(
+                torch.randn(num_position_buckets, num_landmarks) * 0.02
+            )
+            
+            # Content gates: Project hidden states to landmark space
+            self.content_proj = nn.Linear(out_features, num_landmarks, bias=False)
+            nn.init.normal_(self.content_proj.weight, std=0.02)
+            
+            # Landmark bank: K learnable context summary vectors
+            self.landmarks = nn.Parameter(
+                torch.randn(num_landmarks, out_features) * 0.02
+            )
+            
+            # Global PCF modulation scale (starts small, learns importance)
+            self.gamma = nn.Parameter(torch.tensor(0.1))
+        else:
+            # No PCF - just plain rsLoRA
+            self.position_gates = None
+            self.content_proj = None
+            self.landmarks = None
+            self.gamma = None
+        
+        # === Optional DoRA magnitude ===
         if use_dora_magnitude:
             self.magnitude = nn.Parameter(torch.ones(out_features))
             self.register_buffer("base_weight_norm", None)
@@ -1028,28 +1067,45 @@ class HyLoRADAUnified(nn.Module):
             self.magnitude = None
             self.base_weight_norm = None
         
-        # Position-dependent scaling factor
-        self.position_scale = nn.Parameter(torch.tensor(0.0))
-        
-        # Shared position bias
-        self.position_bias = position_bias
-        
         # Dropout
         self.dropout = nn.Dropout(p=dropout) if dropout > 0 else nn.Identity()
         
-        # Initialize
+        # Initialize LoRA
         self.reset_parameters()
     
     def reset_parameters(self):
-        """Initialize parameters."""
+        """Initialize LoRA matrices with orthogonal A, zero B."""
         nn.init.orthogonal_(self.lora_A)
         nn.init.zeros_(self.lora_B)
     
     def init_magnitude(self, base_weight: torch.Tensor):
-        """Initialize magnitude from base weight norms."""
-        weight_norm = base_weight.norm(p=2, dim=1)
-        self.magnitude.data = weight_norm.clone()
-        self.register_buffer("base_weight_norm", weight_norm.clone())
+        """Initialize DoRA magnitude from base weight norms."""
+        if self.magnitude is not None:
+            weight_norm = base_weight.norm(p=2, dim=1)
+            self.magnitude.data = weight_norm.clone()
+            self.register_buffer("base_weight_norm", weight_norm.clone())
+    
+    def _position_to_bucket(self, positions: torch.Tensor) -> torch.Tensor:
+        """
+        Map positions to buckets using logarithmic spacing.
+        
+        First half: exact positions (0, 1, 2, ...)
+        Second half: log-spaced for distant positions
+        """
+        positions = positions.clamp(0)
+        exact_buckets = self.num_position_buckets // 2
+        
+        is_small = positions < exact_buckets
+        
+        # Log bucketing for larger positions
+        relative_pos = (positions.float() - exact_buckets).clamp(min=1)
+        log_bucket = exact_buckets + (
+            (self.num_position_buckets - exact_buckets - 1) *
+            torch.log(relative_pos) / math.log(max(32768, 2))
+        )
+        
+        bucket_ids = torch.where(is_small, positions, log_bucket.long())
+        return bucket_ids.clamp(0, self.num_position_buckets - 1)
     
     def forward(
         self,
@@ -1059,37 +1115,68 @@ class HyLoRADAUnified(nn.Module):
         positions: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        Apply unified HyLoRADA adaptation.
+        Apply HyLoRADA with Position-Content Fusion.
         
-        Combines rsLoRA (rank-stabilized scaling) with optional DoRA magnitude decomposition
-        and position-aware scaling for long-context learning.
+        No threshold conditionals - the same code path handles all context lengths.
+        The model learns when to use position/landmark information.
+        
+        Args:
+            x: Input tensor [batch, seq, in_features]
+            base_output: Output from frozen base layer [batch, seq, out_features]
+            base_weight: Frozen base weight matrix
+            positions: Optional position indices [batch, seq] or None (auto-generated)
+            
+        Returns:
+            Adapted output [batch, seq, out_features]
         """
+        batch_size, seq_len, _ = x.shape
         input_dtype = x.dtype
         x_float = x.to(self.lora_A.dtype)
         
-        # Compute LoRA delta with rsLoRA scaling (α/√r)
+        # === 1. Compute rsLoRA contribution ===
         lora_x = self.dropout(x_float)
         lora_x = F.linear(lora_x, self.lora_A)  # [batch, seq, rank]
         lora_out = F.linear(lora_x, self.lora_B)  # [batch, seq, out_features]
         delta_v = lora_out * self.scaling
         
-        # Apply position-aware scaling if enabled
-        if positions is not None and self.position_bias is not None:
-            pos_bias = self.position_bias(positions)
-            scale_weight = torch.sigmoid(self.position_scale)
-            pos_scale = 1.0 + scale_weight * torch.tanh(pos_bias).unsqueeze(-1)
-            delta_v = delta_v * pos_scale
+        # === 2. Position-Content Fusion (PCF) - only if enabled ===
+        if self.use_pcf:
+            # Generate positions if not provided
+            if positions is None:
+                positions = torch.arange(seq_len, device=x.device)
+            
+            # Position gating: bucket → landmark affinities
+            buckets = self._position_to_bucket(positions)  # [seq] or [batch, seq]
+            if buckets.dim() == 1:
+                pos_gate = self.position_gates[buckets]  # [seq, K]
+                pos_gate = pos_gate.unsqueeze(0).expand(batch_size, -1, -1)  # [batch, seq, K]
+            else:
+                pos_gate = self.position_gates[buckets]  # [batch, seq, K]
+            
+            # Content gating: hidden states → landmark affinities
+            # Use base_output as it has the full hidden state
+            content_gate = self.content_proj(base_output.to(self.lora_A.dtype))  # [batch, seq, K]
+            
+            # Combined soft gating (position + content)
+            combined_gate = F.softmax(pos_gate + content_gate, dim=-1)  # [batch, seq, K]
+            
+            # Select landmarks based on combined gating
+            context = torch.matmul(combined_gate, self.landmarks)  # [batch, seq, out_features]
+            
+            # PCF modulation: bounded [-1, 1] range
+            pcf_modulation = torch.tanh(context)
+            
+            # output = base + delta * (1 + γ * PCF)
+            adapted_delta = delta_v * (1.0 + self.gamma * pcf_modulation)
+            output = base_output.to(self.lora_A.dtype) + adapted_delta
+        else:
+            # Plain rsLoRA without PCF
+            output = base_output.to(self.lora_A.dtype) + delta_v
         
-        # Compute output: base + delta
-        output = base_output.to(self.lora_A.dtype) + delta_v
-        
-        # Apply DoRA magnitude decomposition if enabled
+        # === 3. Optional DoRA magnitude decomposition ===
         if self.use_dora_magnitude and self.magnitude is not None:
-            # Compute merged weight for normalization
             weight_merged = base_weight + (self.lora_B @ self.lora_A) * self.scaling
             weight_norm = weight_merged.norm(p=2, dim=1) + 1e-8
-            
-            # Apply magnitude scaling: output * (magnitude / ||W+BA||)
             mag_scale = self.magnitude / weight_norm
             output = output * mag_scale.unsqueeze(0).unsqueeze(0)
         
@@ -1102,7 +1189,8 @@ class HyLoRADAUnified(nn.Module):
     def extra_repr(self) -> str:
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
-            f"rank={self.rank}, hybrid=True"
+            f"rank={self.rank}, alpha={self.alpha}, landmarks={self.num_landmarks}, "
+            f"pcf_gamma={self.gamma.item():.4f}"
         )
 
 
@@ -1111,7 +1199,7 @@ class UnifiedLayer(nn.Module):
     Unified HyLoRADA wrapper for model injection.
     
     This is the recommended wrapper for applying HyLoRADA to models.
-    Combines all features into a single, efficient layer.
+    Uses Position-Content Fusion (PCF) - no separate position_bias needed.
     """
     
     def __init__(
@@ -1120,7 +1208,8 @@ class UnifiedLayer(nn.Module):
         rank: int = 8,
         alpha: float = 16.0,
         dropout: float = 0.0,
-        position_bias: Optional[PositionBias] = None,
+        num_landmarks: int = 8,
+        num_position_buckets: int = 64,
         use_dora_magnitude: bool = False,
     ):
         super().__init__()
@@ -1140,13 +1229,15 @@ class UnifiedLayer(nn.Module):
             self.is_conv1d = False
             self._base_weight = base_layer.weight
         
+        # Unified HyLoRADA with PCF built-in - no thresholds
         self.adapter = HyLoRADAUnified(
             in_features=in_features,
             out_features=out_features,
             rank=rank,
             alpha=alpha,
             dropout=dropout,
-            position_bias=position_bias,
+            num_landmarks=num_landmarks,
+            num_position_buckets=num_position_buckets,
             use_dora_magnitude=use_dora_magnitude,
         )
         
@@ -1194,14 +1285,15 @@ def apply_unified_to_model(
     rank: int = 8,
     alpha: float = 16.0,
     dropout: float = 0.0,
-    use_position_bias: bool = True,
+    num_landmarks: int = 8,
+    num_position_buckets: int = 64,
     use_dora_magnitude: bool = False,
-) -> Tuple[nn.Module, Dict[str, UnifiedLayer], Optional[PositionBias]]:
+) -> Tuple[nn.Module, Dict[str, UnifiedLayer], None]:
     """
-    Apply unified HyLoRADA adapters to target modules.
+    Apply unified HyLoRADA with Position-Content Fusion to target modules.
     
     This is the recommended function for applying HyLoRADA to models.
-    Creates a shared PositionBias for all layers (only 64 params!).
+    Uses unified PCF architecture - no separate position_bias or thresholds.
     
     Args:
         model: The model to modify (will be modified in-place)
@@ -1209,26 +1301,25 @@ def apply_unified_to_model(
         rank: LoRA rank
         alpha: Scaling factor
         dropout: Dropout probability
-        use_position_bias: Whether to use position-aware scaling
-        use_dora_magnitude: If True, use DoRA-style magnitude (more params). False = lightweight.
+        num_landmarks: Number of PCF landmarks (default: 8)
+        num_position_buckets: Position bucketing granularity (default: 64)
+        use_dora_magnitude: If True, use DoRA-style magnitude decomposition
         
     Returns:
-        Tuple of (modified model, dict of unified layers, shared position bias)
+        Tuple of (modified model, dict of unified layers, None for backward compat)
     """
-    # Create shared position bias (only 64 params total!)
-    position_bias = PositionBias() if use_position_bias else None
-    
     unified_layers = {}
     targets = find_target_modules(model, target_modules)
     
     for name, module in targets.items():
-        # Create unified wrapper
+        # Create unified wrapper with PCF built-in
         unified_layer = UnifiedLayer(
             base_layer=module,
             rank=rank,
             alpha=alpha,
             dropout=dropout,
-            position_bias=position_bias,
+            num_landmarks=num_landmarks,
+            num_position_buckets=num_position_buckets,
             use_dora_magnitude=use_dora_magnitude,
         )
         
@@ -1239,7 +1330,8 @@ def apply_unified_to_model(
         
         unified_layers[name] = unified_layer
     
-    return model, unified_layers, position_bias
+    # Return None as third element for backward compatibility
+    return model, unified_layers, None
 
 
 def _is_linear_layer(module: nn.Module) -> bool:

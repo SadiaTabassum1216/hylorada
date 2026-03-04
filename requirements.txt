@@ -1,22 +1,22 @@
 # HyLoRADA Dependencies
 
 # Core PyTorch
-torch>=2.0.0
+torch>=2.0.0 	# MalPack: DANGER
 
 # HuggingFace Transformers (for model loading)
-transformers>=4.36.0
+transformers>=4.36.0 	# MalPack: DANGER
 
 # HuggingFace Datasets (for data loading)
-datasets>=2.16.0
+datasets>=2.16.0 	# MalPack: SAFE
 
 # Tokenizers
-tokenizers>=0.15.0
+tokenizers>=0.15.0 	# MalPack: SAFE
 
 # Progress bars
-tqdm>=4.65.0
+tqdm>=4.65.0 	# MalPack: DANGER
 
 # HuggingFace Accelerate (for distributed training)
-accelerate>=0.25.0
+accelerate>=0.25.0 	# MalPack: SAFE
 
 # Testing
-pytest>=7.4.0
+pytest>=7.4.0 	# MalPack: DANGER

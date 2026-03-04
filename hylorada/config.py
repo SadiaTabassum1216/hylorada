@@ -1,7 +1,7 @@
 """
 HyLoRADA Configuration Module
 
-Simplified configuration for the unified HyLoRADA architecture.
+Configuration for the unified HyLoRADA architecture with Position-Content Fusion.
 """
 
 from dataclasses import dataclass, field
@@ -14,30 +14,35 @@ logger = logging.getLogger(__name__)
 @dataclass
 class HyLoRADAConfig:
     """
-    Configuration for unified HyLoRADA fine-tuning.
+    Configuration for unified HyLoRADA fine-tuning with Position-Content Fusion.
     
-    HyLoRADA combines proven techniques for cost-efficient long-context learning:
-    1. Orthogonal initialization - Prevents rank collapse
-    2. Position-aware scaling - Addresses lost-in-middle phenomenon
-    3. S²-Attn (LongLoRA) - 16x training cost reduction
-    4. Trainable embeddings & norms - Critical for >32k context
-    5. RoPE scaling (YaRN) - Extends context up to 128k
-    6. Sink tokens (SinkLoRA) - Stable attention patterns
+    HyLoRADA is a SINGLE unified method (no if-else thresholds on sequence length):
+    
+    Key Innovation - Position-Content Fusion (PCF):
+    - Combines position awareness and content-based landmark selection
+    - Model learns when to use position/landmark information
+    - Same architecture handles all context lengths (512 to 32K+)
+    
+    Core Components:
+    1. rsLoRA: Rank-stabilized LoRA with orthogonal initialization (α/√r scaling)
+    2. PCF Module: Unified position-content gating over learnable landmarks
+    3. Optional DoRA magnitude decomposition
+    
+    Extended Components (optional, for extreme contexts):
+    - S²-Attn: Shifted sparse attention for >8K contexts
+    - RoPE scaling: YaRN/Linear for position extrapolation
+    - Trainable embeddings/norms: For >32K contexts
     
     Args:
         lora_rank: Rank for LoRA decomposition
-        lora_alpha: Scaling factor for LoRA updates
+        lora_alpha: Scaling factor for rsLoRA updates
         lora_dropout: Dropout probability for LoRA layers
-        lora_target_modules: Which projections to apply LoRA to
+        lora_target_modules: Which projections to apply HyLoRADA to
         
-        daa_enabled: Use Direct Attention Adaptation for noise filtering
-        daa_num_buckets: Position buckets for DAA
+        num_landmarks: Number of PCF landmarks (learnable context summaries)
+        num_position_buckets: Position bucketing granularity for PCF
         
-        sparse_enabled: Use Sparse MLP adapters
-        sparse_adapter_dim: Bottleneck dimension for sparse adapter
-        sparse_topk_ratio: Fraction of neurons to activate
-        
-        s2_attn_enabled: Use S²-Attn for long context efficiency
+        s2_attn_enabled: Use S²-Attn for very long context efficiency
         s2_group_size: Tokens per attention group
     """
     
@@ -50,28 +55,23 @@ class HyLoRADAConfig:
         "c_attn", "c_proj",  # GPT-2
         "query_key_value",  # Falcon
     )
-    # DoRA magnitude: True = magnitude decomposition, False = standard LoRA
+    # DoRA magnitude: True = magnitude decomposition, False = standard rsLoRA
     # Note: Ablation shows DoRA can degrade performance (-5.62% in tests)
     # Enable only if validated on your specific task
     use_dora_magnitude: bool = False
 
     
-    # ============ Position-Aware Scaling ============
-    # Addresses lost-in-middle with only 64 shared params
-    position_bias_enabled: bool = True
-    position_num_buckets: int = 64
+    # ============ Position-Content Fusion (PCF) Settings ============
+    # Unified module that handles position and content awareness
+    # No thresholds - learns when to use position/landmark information
+    num_landmarks: int = 8           # Learnable context summary tokens
+    num_position_buckets: int = 64   # Position bucketing granularity
     
-    # ============ S²-Attn Settings ============
-    # Disabled by default - requires GQA handling
+    # ============ S²-Attn Settings (Optional) ============
+    # Disabled by default - only needed for very long contexts (>8K)
     s2_attn_enabled: bool = False
     s2_group_size: int = 2048
     s2_shift_ratio: float = 0.5
-    
-    # ============ Position-Adaptive LandmarkLoRA Settings ============
-    # Enabled by default: 9.19% PPL improvement, 9.32% LIM-PPL improvement
-    landmark_enabled: bool = True
-    num_landmarks: int = 8  # Number of learnable context summary tokens
-    num_position_buckets: int = 32  # Position bucketing granularity
     
     # ============ Training Settings ============
     gradient_checkpointing: bool = True
@@ -99,16 +99,11 @@ class HyLoRADAConfig:
         if not 0 <= self.lora_dropout < 1:
             raise ValueError(f"lora_dropout must be in [0, 1), got {self.lora_dropout}")
         
-        # Validate landmark settings
-        if self.landmark_enabled:
-            if self.num_landmarks <= 0:
-                raise ValueError(f"num_landmarks must be positive, got {self.num_landmarks}")
-            if self.num_position_buckets <= 0:
-                raise ValueError(f"num_position_buckets must be positive, got {self.num_position_buckets}")
-        
-        # Validate position bias settings
-        if self.position_bias_enabled and self.position_num_buckets <= 0:
-            raise ValueError(f"position_num_buckets must be positive, got {self.position_num_buckets}")
+        # Validate PCF settings (num_landmarks=0 disables PCF, which is valid)
+        if self.num_landmarks < 0:
+            raise ValueError(f"num_landmarks must be >= 0, got {self.num_landmarks}")
+        if self.num_landmarks > 0 and self.num_position_buckets <= 0:
+            raise ValueError(f"num_position_buckets must be positive when PCF enabled, got {self.num_position_buckets}")
         
         # Validate S²-Attn settings
         if self.s2_attn_enabled:
@@ -148,8 +143,7 @@ class HyLoRADAConfig:
         """Return enabled/disabled status of each component."""
         return {
             "unified_lora": True,  # Always uses unified HyLoRADA
-            "position_bias": self.position_bias_enabled,
-            "landmark": self.landmark_enabled,
+            "pcf": self.num_landmarks > 0,  # PCF enabled if landmarks > 0
             "s2_attn": self.s2_attn_enabled,
         }
     
@@ -161,10 +155,8 @@ class HyLoRADAConfig:
             "lora_dropout": self.lora_dropout,
             "lora_target_modules": list(self.lora_target_modules),
             "use_dora_magnitude": self.use_dora_magnitude,
-            "position_bias_enabled": self.position_bias_enabled,
-            "position_num_buckets": self.position_num_buckets,
-            "landmark_enabled": self.landmark_enabled,
             "num_landmarks": self.num_landmarks,
+            "num_position_buckets": self.num_position_buckets,
             "s2_attn_enabled": self.s2_attn_enabled,
             "s2_group_size": self.s2_group_size,
             "s2_shift_ratio": self.s2_shift_ratio,
