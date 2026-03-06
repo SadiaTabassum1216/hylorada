@@ -66,6 +66,8 @@ class HyLoRADAConfig:
     # No thresholds - learns when to use position/landmark information
     num_landmarks: int = 8           # Learnable context summary tokens
     num_position_buckets: int = 64   # Position bucketing granularity
+    share_pcf: bool = True           # Share position_gates/landmarks/gamma globally
+    pcf_content_bottleneck: bool = True  # Use rank-dim bottleneck for content proj
     
     # ============ S²-Attn Settings (Optional) ============
     # Disabled by default - only needed for very long contexts (>8K)
@@ -144,6 +146,8 @@ class HyLoRADAConfig:
         return {
             "unified_lora": True,  # Always uses unified HyLoRADA
             "pcf": self.num_landmarks > 0,  # PCF enabled if landmarks > 0
+            "share_pcf": self.share_pcf,
+            "pcf_content_bottleneck": self.pcf_content_bottleneck,
             "s2_attn": self.s2_attn_enabled,
         }
     
@@ -157,6 +161,8 @@ class HyLoRADAConfig:
             "use_dora_magnitude": self.use_dora_magnitude,
             "num_landmarks": self.num_landmarks,
             "num_position_buckets": self.num_position_buckets,
+            "share_pcf": self.share_pcf,
+            "pcf_content_bottleneck": self.pcf_content_bottleneck,
             "s2_attn_enabled": self.s2_attn_enabled,
             "s2_group_size": self.s2_group_size,
             "s2_shift_ratio": self.s2_shift_ratio,
@@ -187,21 +193,41 @@ class HyLoRADAPresets:
         """Memory-efficient config for limited GPU resources."""
         return HyLoRADAConfig(
             lora_rank=4,
-            sparse_enabled=False,  # Disable for minimum params
-            sparse_adapter_dim=32,
+            share_pcf=True,
+            pcf_content_bottleneck=True,
+            gradient_checkpointing=True,
+        )
+    
+    @staticmethod
+    def fast() -> HyLoRADAConfig:
+        """Fastest fine-tuning: shared PCF + bottleneck + rank-4. ~74% fewer params."""
+        return HyLoRADAConfig(
+            lora_rank=4,
+            lora_alpha=8.0,
+            share_pcf=True,
+            pcf_content_bottleneck=True,
             gradient_checkpointing=True,
         )
     
     @staticmethod
     def balanced() -> HyLoRADAConfig:
         """Balanced config for typical fine-tuning."""
-        return HyLoRADAConfig()  # Uses defaults
+        return HyLoRADAConfig()  # Uses defaults (share_pcf=True, bottleneck=True)
     
     @staticmethod
     def quality() -> HyLoRADAConfig:
         """Higher capacity for best quality."""
         return HyLoRADAConfig(
             lora_rank=16,
-            sparse_adapter_dim=128,
-            sparse_topk_ratio=0.2,
+            lora_alpha=32.0,
+            share_pcf=True,
+            pcf_content_bottleneck=False,  # Full content projection for quality
+        )
+    
+    @staticmethod
+    def independent_pcf() -> HyLoRADAConfig:
+        """Original behavior: independent PCF per projection (for comparison)."""
+        return HyLoRADAConfig(
+            share_pcf=False,
+            pcf_content_bottleneck=False,
         )

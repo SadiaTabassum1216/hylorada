@@ -7,6 +7,7 @@ from hylorada.config import HyLoRADAConfig
 from hylorada.lora import (
     HyLoRADAUnified,
     UnifiedLayer,
+    SharedPCFBank,
     PositionBias,
     LandmarkLoRA,
     apply_unified_to_model,

@@ -55,13 +55,12 @@ class TestConfig:
         """Test default configuration values."""
         config = HyLoRADAConfig()
         assert config.lora_rank == 8
-        assert config.daa_enabled == True
-        assert config.position_bias_enabled == True  # Unified position bias
-        assert config.sparse_enabled == True  # Enabled by default
+        assert config.num_landmarks == 8
+        assert config.num_position_buckets == 64
+        assert config.share_pcf == True
+        assert config.pcf_content_bottleneck == True
         assert config.s2_attn_enabled == False  # Disabled by default
-        # New simplified defaults
-        assert config.sparse_adapter_dim == 64  # Smaller for efficiency
-        assert config.sparse_topk_ratio == 0.1
+        assert config.use_dora_magnitude == False
     
     def test_invalid_rank(self):
         """Test that rank must be >= 1."""
@@ -154,28 +153,45 @@ class TestUnifiedHyLoRADA:
         assert output.shape == (2, 128)
     
     def test_unified_linear_param_count(self, hidden_size):
-        """Test HyLoRADAUnified has expected number of parameters (lightweight mode)."""
+        """Test HyLoRADAUnified has expected number of parameters (independent PCF mode)."""
         rank = 8
-        # Lightweight mode: no magnitude
-        adapter = HyLoRADAUnified(hidden_size, hidden_size, rank=rank, use_dora_magnitude=False)
+        K = 8  # num_landmarks
+        B_p = 64  # num_position_buckets
+        # Independent mode (no shared_pcf): all PCF params are local
+        adapter = HyLoRADAUnified(
+            hidden_size, hidden_size, rank=rank,
+            use_dora_magnitude=False, shared_pcf=None, pcf_content_bottleneck=False
+        )
         
-        # Expected: lora_A (r*in) + lora_B (out*r) + 1 scalar (position_scale), NO magnitude
-        expected = rank * hidden_size + hidden_size * rank + 1
+        # Expected: lora_A (r*d) + lora_B (d*r) + pos_gates (B_p*K)
+        #         + content_proj (K*d) + landmarks (K*d) + gamma (1)
+        expected = (rank * hidden_size + hidden_size * rank  # LoRA A, B
+                   + B_p * K  # position_gates
+                   + K * hidden_size  # content_proj
+                   + K * hidden_size  # landmarks
+                   + 1)  # gamma
         actual = sum(p.numel() for p in adapter.parameters())
         
-        assert actual == expected
+        assert actual == expected, f"Expected {expected}, got {actual}"
     
     def test_unified_linear_param_count_dora(self, hidden_size):
         """Test HyLoRADAUnified with DoRA magnitude has expected params."""
         rank = 8
-        # DoRA mode: includes magnitude
-        adapter = HyLoRADAUnified(hidden_size, hidden_size, rank=rank, use_dora_magnitude=True)
+        K = 8
+        B_p = 64
+        # DoRA mode with independent PCF
+        adapter = HyLoRADAUnified(
+            hidden_size, hidden_size, rank=rank,
+            use_dora_magnitude=True, shared_pcf=None, pcf_content_bottleneck=False
+        )
         
-        # Expected: lora_A (r*in) + lora_B (out*r) + magnitude (out) + 1 scalar (position_scale)
-        expected = rank * hidden_size + hidden_size * rank + hidden_size + 1
+        # Same as above + magnitude (d)
+        expected = (rank * hidden_size + hidden_size * rank
+                   + B_p * K + K * hidden_size + K * hidden_size + 1
+                   + hidden_size)  # magnitude
         actual = sum(p.numel() for p in adapter.parameters())
         
-        assert actual == expected
+        assert actual == expected, f"Expected {expected}, got {actual}"
     
     def test_unified_layer_forward(self, sample_input, hidden_size):
         """Test UnifiedLayer forward pass."""
@@ -187,9 +203,8 @@ class TestUnifiedHyLoRADA:
     
     def test_unified_with_positions(self, sample_input, hidden_size, seq_len, batch_size):
         """Test UnifiedLayer with position input."""
-        pos_bias = PositionBias()
         base_layer = nn.Linear(hidden_size, hidden_size)
-        unified = UnifiedLayer(base_layer, rank=8, position_bias=pos_bias)
+        unified = UnifiedLayer(base_layer, rank=8)
         
         positions = torch.arange(seq_len).unsqueeze(0).expand(batch_size, -1)
         output = unified(sample_input, positions=positions)
@@ -208,13 +223,17 @@ class TestUnifiedHyLoRADA:
                 return self.q_proj(x) + self.v_proj(x)
         
         model = SimpleModel()
-        model, layers, pos_bias = apply_unified_to_model(
-            model, target_modules=("q_proj", "v_proj"), rank=4
+        model, layers, shared_pcf = apply_unified_to_model(
+            model, target_modules=("q_proj", "v_proj"), rank=4,
+            share_pcf=True, pcf_content_bottleneck=True,
         )
         
         assert len(layers) == 2
-        assert pos_bias is not None
-        assert sum(p.numel() for p in pos_bias.parameters()) == 64
+        assert shared_pcf is not None
+        # SharedPCFBank params: position_gates (64*8) + landmarks (8*d) + gamma (1)
+        shared_params = sum(p.numel() for p in shared_pcf.parameters())
+        expected_shared = 64 * 8 + 8 * hidden_size + 1
+        assert shared_params == expected_shared, f"Expected {expected_shared}, got {shared_params}"
 
 
 # ==================== DAA Tests ====================

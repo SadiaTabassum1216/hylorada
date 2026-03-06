@@ -967,6 +967,66 @@ class LandmarkLoRA(nn.Module):
         )
 
 
+class SharedPCFBank(nn.Module):
+    """
+    Shared Position-Content Fusion bank for parameter-efficient HyLoRADA.
+    
+    Instead of duplicating position_gates, landmarks, and gamma in every adapted
+    projection, this module holds them once and is shared by all HyLoRADAUnified
+    instances. This eliminates ~51% of redundant PCF parameters.
+    
+    Only the lightweight content projection (rank → K) remains per-layer.
+    """
+    
+    def __init__(
+        self,
+        out_features: int,
+        num_landmarks: int = 8,
+        num_position_buckets: int = 64,
+    ):
+        super().__init__()
+        
+        self.out_features = out_features
+        self.num_landmarks = num_landmarks
+        self.num_position_buckets = num_position_buckets
+        
+        # Position gates: each position bucket has affinity to K landmarks
+        self.position_gates = nn.Parameter(
+            torch.randn(num_position_buckets, num_landmarks) * 0.02
+        )
+        
+        # Landmark bank: K learnable context summary vectors
+        self.landmarks = nn.Parameter(
+            torch.randn(num_landmarks, out_features) * 0.02
+        )
+        
+        # Global PCF modulation scale (starts small, learns importance)
+        self.gamma = nn.Parameter(torch.tensor(0.1))
+    
+    def position_to_bucket(self, positions: torch.Tensor) -> torch.Tensor:
+        """Map positions to buckets using split exact/logarithmic spacing."""
+        positions = positions.clamp(0)
+        exact_buckets = self.num_position_buckets // 2
+        
+        is_small = positions < exact_buckets
+        
+        relative_pos = (positions.float() - exact_buckets).clamp(min=1)
+        log_bucket = exact_buckets + (
+            (self.num_position_buckets - exact_buckets - 1) *
+            torch.log(relative_pos) / math.log(max(32768, 2))
+        )
+        
+        bucket_ids = torch.where(is_small, positions, log_bucket.long())
+        return bucket_ids.clamp(0, self.num_position_buckets - 1)
+    
+    def extra_repr(self) -> str:
+        return (
+            f"out_features={self.out_features}, num_landmarks={self.num_landmarks}, "
+            f"num_position_buckets={self.num_position_buckets}, "
+            f"gamma={self.gamma.item():.4f}"
+        )
+
+
 class HyLoRADAUnified(nn.Module):
     """
     HyLoRADA: Unified Position-Content Fusion LoRA.
@@ -1002,6 +1062,8 @@ class HyLoRADAUnified(nn.Module):
         num_landmarks: int = 8,
         num_position_buckets: int = 64,
         use_dora_magnitude: bool = False,
+        shared_pcf: Optional['SharedPCFBank'] = None,
+        pcf_content_bottleneck: bool = False,
     ):
         super().__init__()
         
@@ -1026,6 +1088,7 @@ class HyLoRADAUnified(nn.Module):
         self.use_dora_magnitude = use_dora_magnitude
         self.num_landmarks = num_landmarks
         self.num_position_buckets = num_position_buckets
+        self.pcf_content_bottleneck = pcf_content_bottleneck
         
         # === rsLoRA matrices with ORTHOGONAL initialization ===
         self.lora_A = nn.Parameter(torch.zeros(rank, in_features))
@@ -1034,24 +1097,34 @@ class HyLoRADAUnified(nn.Module):
         # === Position-Content Fusion (PCF) Module ===
         # Only create PCF components if num_landmarks > 0
         self.use_pcf = num_landmarks > 0
+        self.shared_pcf = shared_pcf  # Reference to shared bank (not owned)
         
         if self.use_pcf:
-            # Position gates: Each position bucket has affinity to K landmarks
-            self.position_gates = nn.Parameter(
-                torch.randn(num_position_buckets, num_landmarks) * 0.02
-            )
+            if shared_pcf is not None:
+                # === SHARED MODE: Use global PCF bank ===
+                # position_gates, landmarks, gamma come from shared_pcf
+                self.position_gates = None
+                self.landmarks = None
+                self.gamma = None
+            else:
+                # === INDEPENDENT MODE: Own PCF components (original behavior) ===
+                self.position_gates = nn.Parameter(
+                    torch.randn(num_position_buckets, num_landmarks) * 0.02
+                )
+                self.landmarks = nn.Parameter(
+                    torch.randn(num_landmarks, out_features) * 0.02
+                )
+                self.gamma = nn.Parameter(torch.tensor(0.1))
             
-            # Content gates: Project hidden states to landmark space
-            self.content_proj = nn.Linear(out_features, num_landmarks, bias=False)
+            # Content projection: always per-layer (each projection sees different representations)
+            if pcf_content_bottleneck:
+                # BOTTLENECK: Use LoRA intermediate (rank → K) instead of (d → K)
+                # Saves ~6K params per projection for d=768, K=8, r=8
+                self.content_proj = nn.Linear(rank, num_landmarks, bias=False)
+            else:
+                # ORIGINAL: Project from full hidden dimension
+                self.content_proj = nn.Linear(out_features, num_landmarks, bias=False)
             nn.init.normal_(self.content_proj.weight, std=0.02)
-            
-            # Landmark bank: K learnable context summary vectors
-            self.landmarks = nn.Parameter(
-                torch.randn(num_landmarks, out_features) * 0.02
-            )
-            
-            # Global PCF modulation scale (starts small, learns importance)
-            self.gamma = nn.Parameter(torch.tensor(0.1))
         else:
             # No PCF - just plain rsLoRA
             self.position_gates = None
@@ -1120,6 +1193,10 @@ class HyLoRADAUnified(nn.Module):
         No threshold conditionals - the same code path handles all context lengths.
         The model learns when to use position/landmark information.
         
+        Supports two PCF modes:
+        - Independent: owns position_gates, landmarks, gamma (original)
+        - Shared: references a SharedPCFBank for parameter efficiency
+        
         Args:
             x: Input tensor [batch, seq, in_features]
             base_output: Output from frozen base layer [batch, seq, out_features]
@@ -1141,33 +1218,49 @@ class HyLoRADAUnified(nn.Module):
         
         # === 2. Position-Content Fusion (PCF) - only if enabled ===
         if self.use_pcf:
+            # Resolve PCF components (shared or independent)
+            if self.shared_pcf is not None:
+                position_gates = self.shared_pcf.position_gates
+                landmarks = self.shared_pcf.landmarks
+                gamma = self.shared_pcf.gamma
+                position_to_bucket = self.shared_pcf.position_to_bucket
+            else:
+                position_gates = self.position_gates
+                landmarks = self.landmarks
+                gamma = self.gamma
+                position_to_bucket = self._position_to_bucket
+            
             # Generate positions if not provided
             if positions is None:
                 positions = torch.arange(seq_len, device=x.device)
             
             # Position gating: bucket → landmark affinities
-            buckets = self._position_to_bucket(positions)  # [seq] or [batch, seq]
+            buckets = position_to_bucket(positions)  # [seq] or [batch, seq]
             if buckets.dim() == 1:
-                pos_gate = self.position_gates[buckets]  # [seq, K]
+                pos_gate = position_gates[buckets]  # [seq, K]
                 pos_gate = pos_gate.unsqueeze(0).expand(batch_size, -1, -1)  # [batch, seq, K]
             else:
-                pos_gate = self.position_gates[buckets]  # [batch, seq, K]
+                pos_gate = position_gates[buckets]  # [batch, seq, K]
             
-            # Content gating: hidden states → landmark affinities
-            # Use base_output as it has the full hidden state
-            content_gate = self.content_proj(base_output.to(self.lora_A.dtype))  # [batch, seq, K]
+            # Content gating: depends on bottleneck mode
+            if self.pcf_content_bottleneck:
+                # BOTTLENECK: Use LoRA intermediate (rank-dimensional, already computed)
+                content_gate = self.content_proj(lora_x)  # [batch, seq, K]
+            else:
+                # ORIGINAL: Project from full hidden dimension
+                content_gate = self.content_proj(base_output.to(self.lora_A.dtype))  # [batch, seq, K]
             
             # Combined soft gating (position + content)
             combined_gate = F.softmax(pos_gate + content_gate, dim=-1)  # [batch, seq, K]
             
             # Select landmarks based on combined gating
-            context = torch.matmul(combined_gate, self.landmarks)  # [batch, seq, out_features]
+            context = torch.matmul(combined_gate, landmarks)  # [batch, seq, out_features]
             
             # PCF modulation: bounded [-1, 1] range
             pcf_modulation = torch.tanh(context)
             
             # output = base + delta * (1 + γ * PCF)
-            adapted_delta = delta_v * (1.0 + self.gamma * pcf_modulation)
+            adapted_delta = delta_v * (1.0 + gamma * pcf_modulation)
             output = base_output.to(self.lora_A.dtype) + adapted_delta
         else:
             # Plain rsLoRA without PCF
@@ -1187,10 +1280,22 @@ class HyLoRADAUnified(nn.Module):
         return (self.lora_B @ self.lora_A) * self.scaling
     
     def extra_repr(self) -> str:
+        if self.use_pcf:
+            if self.shared_pcf is not None:
+                gamma_val = self.shared_pcf.gamma.item()
+                pcf_mode = "shared"
+            else:
+                gamma_val = self.gamma.item()
+                pcf_mode = "independent"
+            return (
+                f"in_features={self.in_features}, out_features={self.out_features}, "
+                f"rank={self.rank}, alpha={self.alpha}, landmarks={self.num_landmarks}, "
+                f"pcf_mode={pcf_mode}, bottleneck={self.pcf_content_bottleneck}, "
+                f"pcf_gamma={gamma_val:.4f}"
+            )
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
-            f"rank={self.rank}, alpha={self.alpha}, landmarks={self.num_landmarks}, "
-            f"pcf_gamma={self.gamma.item():.4f}"
+            f"rank={self.rank}, alpha={self.alpha}, landmarks=0"
         )
 
 
@@ -1211,6 +1316,8 @@ class UnifiedLayer(nn.Module):
         num_landmarks: int = 8,
         num_position_buckets: int = 64,
         use_dora_magnitude: bool = False,
+        shared_pcf: Optional[SharedPCFBank] = None,
+        pcf_content_bottleneck: bool = False,
     ):
         super().__init__()
         
@@ -1239,6 +1346,8 @@ class UnifiedLayer(nn.Module):
             num_landmarks=num_landmarks,
             num_position_buckets=num_position_buckets,
             use_dora_magnitude=use_dora_magnitude,
+            shared_pcf=shared_pcf,
+            pcf_content_bottleneck=pcf_content_bottleneck,
         )
         
         # Initialize magnitude from base weights (only if using DoRA)
@@ -1288,7 +1397,9 @@ def apply_unified_to_model(
     num_landmarks: int = 8,
     num_position_buckets: int = 64,
     use_dora_magnitude: bool = False,
-) -> Tuple[nn.Module, Dict[str, UnifiedLayer], None]:
+    share_pcf: bool = True,
+    pcf_content_bottleneck: bool = True,
+) -> Tuple[nn.Module, Dict[str, UnifiedLayer], Optional[SharedPCFBank]]:
     """
     Apply unified HyLoRADA with Position-Content Fusion to target modules.
     
@@ -1304,12 +1415,32 @@ def apply_unified_to_model(
         num_landmarks: Number of PCF landmarks (default: 8)
         num_position_buckets: Position bucketing granularity (default: 64)
         use_dora_magnitude: If True, use DoRA-style magnitude decomposition
+        share_pcf: If True, share position_gates/landmarks/gamma across all
+            adapted projections (recommended, saves ~50% PCF params)
+        pcf_content_bottleneck: If True, use rank-dimensional bottleneck for
+            content projection instead of full hidden dimension
         
     Returns:
-        Tuple of (modified model, dict of unified layers, None for backward compat)
+        Tuple of (modified model, dict of unified layers, shared_pcf or None)
     """
     unified_layers = {}
     targets = find_target_modules(model, target_modules)
+    
+    # Create shared PCF bank if requested and landmarks are enabled
+    shared_pcf = None
+    if share_pcf and num_landmarks > 0 and len(targets) > 0:
+        # Detect out_features from first target for landmark dimension
+        first_module = next(iter(targets.values()))
+        if hasattr(first_module, 'nf'):  # Conv1D
+            out_features = first_module.nf
+        else:  # nn.Linear
+            out_features = first_module.out_features
+        
+        shared_pcf = SharedPCFBank(
+            out_features=out_features,
+            num_landmarks=num_landmarks,
+            num_position_buckets=num_position_buckets,
+        )
     
     for name, module in targets.items():
         # Create unified wrapper with PCF built-in
@@ -1321,6 +1452,8 @@ def apply_unified_to_model(
             num_landmarks=num_landmarks,
             num_position_buckets=num_position_buckets,
             use_dora_magnitude=use_dora_magnitude,
+            shared_pcf=shared_pcf,
+            pcf_content_bottleneck=pcf_content_bottleneck,
         )
         
         # Replace module in parent
@@ -1330,8 +1463,8 @@ def apply_unified_to_model(
         
         unified_layers[name] = unified_layer
     
-    # Return None as third element for backward compatibility
-    return model, unified_layers, None
+    # Return shared_pcf as third element (replaces None for backward compat)
+    return model, unified_layers, shared_pcf
 
 
 def _is_linear_layer(module: nn.Module) -> bool:

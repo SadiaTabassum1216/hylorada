@@ -16,7 +16,7 @@ from dataclasses import dataclass
 
 from .config import HyLoRADAConfig
 from .lora import (
-    UnifiedLayer, PositionBias, HyLoRADAUnified, LandmarkLoRA,
+    UnifiedLayer, PositionBias, HyLoRADAUnified, LandmarkLoRA, SharedPCFBank,
     apply_unified_to_model,
     count_lora_params, merge_lora_weights, get_lora_plus_param_groups,
     # Legacy imports for baselines
@@ -32,6 +32,7 @@ class HyLoRADAState:
     position_bias: Optional[PositionBias]
     s2_wrappers: List[Any]
     landmark: Optional[LandmarkLoRA]
+    shared_pcf: Optional[SharedPCFBank]
     config: HyLoRADAConfig
 
 
@@ -79,6 +80,7 @@ class HyLoRADAModel(nn.Module):
             position_bias=None,
             s2_wrappers=[],
             landmark=None,
+            shared_pcf=None,
             config=self.config,
         )
         
@@ -113,7 +115,7 @@ class HyLoRADAModel(nn.Module):
     def _apply_hylorada(self):
         """Apply unified HyLoRADA with Position-Content Fusion to the model."""
         # 1. Apply unified HyLoRADA adapters (PCF built-in, no separate components)
-        self.base_model, self.state.lora_layers, _ = apply_unified_to_model(
+        self.base_model, self.state.lora_layers, self.state.shared_pcf = apply_unified_to_model(
             model=self.base_model,
             target_modules=self.config.lora_target_modules,
             rank=self.config.lora_rank,
@@ -122,6 +124,8 @@ class HyLoRADAModel(nn.Module):
             num_landmarks=self.config.num_landmarks,
             num_position_buckets=self.config.num_position_buckets,
             use_dora_magnitude=self.config.use_dora_magnitude,
+            share_pcf=self.config.share_pcf,
+            pcf_content_bottleneck=self.config.pcf_content_bottleneck,
         )
         
         # 2. Apply S²-Attn if enabled (only for very long contexts >8K)
@@ -206,6 +210,7 @@ class HyLoRADAModel(nn.Module):
         trainable = sum(p.numel() for p in self.get_trainable_params())
         lora_params = count_lora_params(self.base_model)
         landmark_params = sum(p.numel() for p in self.state.landmark.parameters()) if self.state.landmark else 0
+        shared_pcf_params = sum(p.numel() for p in self.state.shared_pcf.parameters()) if self.state.shared_pcf else 0
         
         return {
             "total_params": total,
@@ -213,6 +218,7 @@ class HyLoRADAModel(nn.Module):
             "trainable_ratio": trainable / max(total, 1),
             "lora_params": lora_params,
             "landmark_params": landmark_params,
+            "shared_pcf_params": shared_pcf_params,
         }
     
     def print_trainable_params(self):
@@ -229,6 +235,7 @@ class HyLoRADAModel(nn.Module):
         print("Component Breakdown:")
         print(f"  LoRA:       {counts['lora_params']:,}")
         print(f"  Landmark:   {counts['landmark_params']:,}")
+        print(f"  Shared PCF: {counts['shared_pcf_params']:,}")
         print("=" * 60)
     
     def get_memory_estimate(self, seq_len: int, batch_size: int = 1) -> Dict[str, float]:
