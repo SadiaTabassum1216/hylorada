@@ -210,7 +210,17 @@ class HyLoRADAModel(nn.Module):
         trainable = sum(p.numel() for p in self.get_trainable_params())
         lora_params = count_lora_params(self.base_model)
         landmark_params = sum(p.numel() for p in self.state.landmark.parameters()) if self.state.landmark else 0
-        shared_pcf_params = sum(p.numel() for p in self.state.shared_pcf.parameters()) if self.state.shared_pcf else 0
+        
+        shared_pcf_params = 0
+        if self.state.shared_pcf:
+            if isinstance(self.state.shared_pcf, nn.ModuleDict):
+                shared_pcf_params = sum(
+                    sum(p.numel() for p in bank.parameters()) 
+                    for bank in self.state.shared_pcf.values()
+                )
+            else:
+                # Fallback for older checkpoints/single module
+                shared_pcf_params = sum(p.numel() for p in self.state.shared_pcf.parameters())
         
         return {
             "total_params": total,

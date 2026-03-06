@@ -1399,7 +1399,7 @@ def apply_unified_to_model(
     use_dora_magnitude: bool = False,
     share_pcf: bool = True,
     pcf_content_bottleneck: bool = True,
-) -> Tuple[nn.Module, Dict[str, UnifiedLayer], Optional[SharedPCFBank]]:
+) -> Tuple[nn.Module, Dict[str, UnifiedLayer], Optional[nn.ModuleDict]]:
     """
     Apply unified HyLoRADA with Position-Content Fusion to target modules.
     
@@ -1421,28 +1421,34 @@ def apply_unified_to_model(
             content projection instead of full hidden dimension
         
     Returns:
-        Tuple of (modified model, dict of unified layers, shared_pcf or None)
+        Tuple of (modified model, dict of unified layers, shared_pcf_dict or None)
     """
     unified_layers = {}
     targets = find_target_modules(model, target_modules)
     
-    # Create shared PCF bank if requested and landmarks are enabled
-    shared_pcf = None
-    if share_pcf and num_landmarks > 0 and len(targets) > 0:
-        # Detect out_features from first target for landmark dimension
-        first_module = next(iter(targets.values()))
-        if hasattr(first_module, 'nf'):  # Conv1D
-            out_features = first_module.nf
-        else:  # nn.Linear
-            out_features = first_module.out_features
-        
-        shared_pcf = SharedPCFBank(
-            out_features=out_features,
-            num_landmarks=num_landmarks,
-            num_position_buckets=num_position_buckets,
-        )
+    # We may need multiple SharedPCFBanks if target modules have different
+    # output dimensions (e.g., GPT-2 c_attn=2304, c_proj=768)
+    shared_pcfs = nn.ModuleDict() if share_pcf and num_landmarks > 0 else None
     
     for name, module in targets.items():
+        # Determine out_features for this module
+        if hasattr(module, 'nf'):  # Conv1D
+            out_features = module.nf
+        else:  # nn.Linear
+            out_features = module.out_features
+            
+        # Get or create the appropriate SharedPCFBank
+        layer_shared_pcf = None
+        if shared_pcfs is not None:
+            dim_key = str(out_features)
+            if dim_key not in shared_pcfs:
+                shared_pcfs[dim_key] = SharedPCFBank(
+                    out_features=out_features,
+                    num_landmarks=num_landmarks,
+                    num_position_buckets=num_position_buckets,
+                )
+            layer_shared_pcf = shared_pcfs[dim_key]
+            
         # Create unified wrapper with PCF built-in
         unified_layer = UnifiedLayer(
             base_layer=module,
@@ -1452,7 +1458,7 @@ def apply_unified_to_model(
             num_landmarks=num_landmarks,
             num_position_buckets=num_position_buckets,
             use_dora_magnitude=use_dora_magnitude,
-            shared_pcf=shared_pcf,
+            shared_pcf=layer_shared_pcf,
             pcf_content_bottleneck=pcf_content_bottleneck,
         )
         
@@ -1463,8 +1469,8 @@ def apply_unified_to_model(
         
         unified_layers[name] = unified_layer
     
-    # Return shared_pcf as third element (replaces None for backward compat)
-    return model, unified_layers, shared_pcf
+    # Return shared_pcfs (ModuleDict) as third element
+    return model, unified_layers, shared_pcfs if (shared_pcfs is not None and len(shared_pcfs) > 0) else None
 
 
 def _is_linear_layer(module: nn.Module) -> bool:

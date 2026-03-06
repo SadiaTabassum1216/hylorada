@@ -223,15 +223,17 @@ class TestUnifiedHyLoRADA:
                 return self.q_proj(x) + self.v_proj(x)
         
         model = SimpleModel()
-        model, layers, shared_pcf = apply_unified_to_model(
+        model, layers, shared_pcfs = apply_unified_to_model(
             model, target_modules=("q_proj", "v_proj"), rank=4,
             share_pcf=True, pcf_content_bottleneck=True,
         )
         
         assert len(layers) == 2
-        assert shared_pcf is not None
+        assert shared_pcfs is not None
+        assert str(hidden_size) in shared_pcfs
         # SharedPCFBank params: position_gates (64*8) + landmarks (8*d) + gamma (1)
-        shared_params = sum(p.numel() for p in shared_pcf.parameters())
+        bank = shared_pcfs[str(hidden_size)]
+        shared_params = sum(p.numel() for p in bank.parameters())
         expected_shared = 64 * 8 + 8 * hidden_size + 1
         assert shared_params == expected_shared, f"Expected {expected_shared}, got {shared_params}"
 
@@ -290,7 +292,7 @@ class TestSparseMLP:
     def test_topk_gate(self, hidden_size):
         """Test TopKGate neuron selection."""
         num_neurons = 128
-        topk_ratio = 0.1
+        topk_ratio = 0.25  # Use exactly representable float (128 * 0.25 = 32)
         
         gate = TopKGate(hidden_size, num_neurons, topk_ratio)
         x = torch.randn(2, 64, hidden_size)
