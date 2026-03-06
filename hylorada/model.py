@@ -326,14 +326,15 @@ def get_hylorada_optimizer_groups(
     weight_decay: float = 0.01,
 ) -> List[Dict[str, Any]]:
     """
-    Get optimizer parameter groups with component-specific learning rates.
+    Get optimizer parameter groups with LoRA+ asymmetric learning rates.
     
-    This allows different learning rates for different HyLoRADA components,
-    which can improve training stability.
+    LoRA+ insight: B matrix (zero-initialized) needs higher LR than A matrix
+    (orthogonal-initialized) because B must learn from scratch while A starts
+    with a good basis. Using lr_B = 10 * lr_A improves convergence.
     
     Args:
         model: HyLoRADAModel instance
-        lr_lora: Learning rate for LoRA parameters
+        lr_lora: Base learning rate for LoRA A matrix
         lr_daa: Learning rate for DAA parameters
         lr_sparse: Learning rate for sparse MLP parameters
         weight_decay: Weight decay coefficient
@@ -341,7 +342,9 @@ def get_hylorada_optimizer_groups(
     Returns:
         List of parameter groups for optimizer
     """
-    lora_params = []
+    params_A = []       # LoRA A matrices (orthogonal init)
+    params_B = []       # LoRA B matrices (zero init, needs higher LR)
+    pcf_params = []     # PCF: landmarks, position_gates, gamma, content_proj
     daa_params = []
     sparse_params = []
     other_params = []
@@ -350,30 +353,52 @@ def get_hylorada_optimizer_groups(
         if not param.requires_grad:
             continue
         
-        if "lora" in name.lower():
-            lora_params.append(param)
-        elif "daa" in name.lower() or "alpha" in name or "beta" in name:
+        name_lower = name.lower()
+        
+        if "lora_a" in name_lower:
+            params_A.append(param)
+        elif "lora_b" in name_lower:
+            params_B.append(param)
+        elif any(k in name_lower for k in ("landmark", "position_gate", "gamma", "content_proj")):
+            pcf_params.append(param)
+        elif "daa" in name_lower or "alpha" in name or "beta" in name:
             daa_params.append(param)
-        elif "sparse" in name.lower() or "gate" in name.lower():
+        elif "sparse" in name_lower or "gate" in name_lower:
             sparse_params.append(param)
         else:
             other_params.append(param)
     
     groups = []
     
-    if lora_params:
+    if params_A:
         groups.append({
-            "params": lora_params,
+            "params": params_A,
             "lr": lr_lora,
             "weight_decay": weight_decay,
-            "name": "lora",
+            "name": "lora_A",
+        })
+    
+    if params_B:
+        groups.append({
+            "params": params_B,
+            "lr": lr_lora * 10,  # LoRA+: B learns 10× faster than A
+            "weight_decay": weight_decay,
+            "name": "lora_B",
+        })
+    
+    if pcf_params:
+        groups.append({
+            "params": pcf_params,
+            "lr": lr_lora * 5,  # PCF params: moderate boost
+            "weight_decay": 0.0,  # No weight decay for small tables/scalars
+            "name": "pcf",
         })
     
     if daa_params:
         groups.append({
             "params": daa_params,
             "lr": lr_daa,
-            "weight_decay": 0.0,  # No weight decay for attention scalars
+            "weight_decay": 0.0,
             "name": "daa",
         })
     
@@ -388,7 +413,7 @@ def get_hylorada_optimizer_groups(
     if other_params:
         groups.append({
             "params": other_params,
-            "lr": lr_lora,  # Default LR
+            "lr": lr_lora,
             "weight_decay": weight_decay,
             "name": "other",
         })

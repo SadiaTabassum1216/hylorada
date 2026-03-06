@@ -223,7 +223,7 @@ def train_model(model, tokenizer, train_texts, args, method_name):
         per_device_batch_size=args.batch_size,
         learning_rate=args.lr,
         gradient_accumulation_steps=args.grad_accum,
-        warmup_ratio=0.03,
+        warmup_ratio=0.1,
         logging_steps=50,
     )
     
@@ -668,7 +668,7 @@ def run_benchmark_for_model(model_alias, args, device, dtype):
                     lora_alpha=args.lora_rank * 2,  # Standard rsLoRA scaling
                     lora_dropout=0.05,
                     use_dora_magnitude=False,  # Ablation: DoRA degrades on short context
-                    num_landmarks=8 if is_long_context else 4,  # PCF landmarks
+                    num_landmarks=8,  # Always 8: shared PCF means no extra cost
                     num_position_buckets=64,  # Position bucketing granularity
                     s2_attn_enabled=args.s2_attn if args.max_length >= 4096 else False,
                     max_sequence_length=args.max_length,
