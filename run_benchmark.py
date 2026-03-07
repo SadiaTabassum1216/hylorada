@@ -302,17 +302,40 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
         print(f"    Dataset: Standard Language Modeling (WikiText)")
         
     elif dataset_name == "code":
-        try:
-            dataset = load_dataset("nuprl/MultiPL-E", "humaneval-py", split="test")
-            texts = [f"# Python:\\n{s['prompt']}" for s in dataset if s.get("prompt")]
-            while len(texts) < num_train + num_test:
-                texts = texts + texts
-            train_texts = texts[:num_train]
-            test_texts = texts[num_train:num_train + num_test]
-            print(f"    Dataset: MultiPL-E Python")
-        except:
-            print(f"    Warning: Code dataset failed, using wikitext")
+        # Try multiple code datasets in order of preference
+        code_datasets = [
+            ("mbpp", "test", lambda s: f"# Python:\n{s.get('text', s.get('prompt', ''))}", "MBPP Python"),
+            ("google-research-datasets/mbpp", "test", lambda s: f"# Python:\n{s.get('text', s.get('prompt', ''))}", "MBPP Python"),
+            ("nuprl/MultiPL-E", "py", lambda s: f"# Python:\n{s.get('prompt', '')}", "MultiPL-E Python"),
+            ("codeparrot/codeparrot-clean-valid", None, lambda s: s.get("content", ""), "CodeParrot"),
+        ]
+        
+        texts = None
+        ds_name = None
+        for ds_path, split_name, extractor, name in code_datasets:
+            try:
+                if split_name:
+                    dataset = load_dataset(ds_path, split=split_name, trust_remote_code=True)
+                else:
+                    dataset = load_dataset(ds_path, split="train", trust_remote_code=True)
+                texts = [extractor(s) for s in dataset if extractor(s).strip()]
+                texts = [t for t in texts if len(t) > 20]
+                if len(texts) >= 10:
+                    ds_name = name
+                    print(f"    Dataset: {ds_name}")
+                    break
+            except Exception as e:
+                print(f"    Warning: {name} failed ({e})")
+                continue
+        
+        if texts is None or len(texts) < 10:
+            print(f"    Warning: All code datasets failed, using wikitext")
             return load_dataset_by_name("wikitext", num_train, num_test, max_length)
+        
+        while len(texts) < num_train + num_test:
+            texts = texts + texts
+        train_texts = texts[:num_train]
+        test_texts = texts[num_train:num_train + num_test]
             
     elif dataset_name == "longbench":
         # Use Salesforce wikitext-103 (long articles)
