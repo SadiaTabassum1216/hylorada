@@ -329,8 +329,7 @@ def load_dataset_by_name(dataset_name, num_train, num_test, max_length):
                 continue
         
         if texts is None or len(texts) < 10:
-            print(f"    Warning: All code datasets failed, using wikitext")
-            return load_dataset_by_name("wikitext", num_train, num_test, max_length)
+            raise RuntimeError("All code datasets failed. Please check internet connection or set HF_TOKEN.")
         
         while len(texts) < num_train + num_test:
             texts = texts + texts
